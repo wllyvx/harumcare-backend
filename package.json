@@ -9,5 +9,11 @@
 	},
 	"devDependencies": {
 		"wrangler": "^4.59.3"
+	},
+	"dependencies": {
+		"bcryptjs": "^3.0.3",
+		"hono": "^4.11.4",
+		"jsonwebtoken": "^9.0.3",
+		"mongoose": "^9.1.5"
 	}
 }
