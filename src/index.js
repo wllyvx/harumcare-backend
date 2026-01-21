@@ -4,8 +4,17 @@ import { connectDB } from './db/connect.js';
 
 const app = new Hono();
 
+// AKSES URL UNTUK FRONTEND
 // Global Middleware
-app.use('/*', cors());
+app.use('/*', cors({
+    origin: '*',
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Custom-Header'],
+    exposeHeaders: ['Content-Length'],
+    maxAge: 600,
+    credentials: true,
+}));
+
 
 // Database Connection Middleware
 app.use('*', async (c, next) => {
