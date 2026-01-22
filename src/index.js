@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { connectDB } from './db/connect.js';
+import { createDbClient } from './db/connect.js';
 
 const app = new Hono();
 

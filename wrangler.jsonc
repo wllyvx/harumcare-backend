@@ -26,7 +26,7 @@
 		{
 			"binding": "DB",
 			"database_name": "harumcare-db",
-			"database_id": "caeb1120-8916-b7b9-a132e3c96b6a",
+			"database_id": "caeb1120-8917-4aa6-b7b9-a132e3c96b6a",
 			"migrations_dir": "drizzle"
 		}
 	]

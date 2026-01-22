@@ -38,6 +38,7 @@ export const news = sqliteTable('news', {
     image: text('image').default('images/empty-image-placeholder.webp'),
     authorId: integer('author_id').references(() => users.id).notNull(),
     category: text('category').default('umum').notNull(),
+    campaignId: integer('campaign_id').references(() => campaigns.id),
     status: text('status', { enum: ['draft', 'published'] }).default('draft'),
     viewCount: integer('viewCount').default(0),
     createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
@@ -74,10 +75,3 @@ export const donations = sqliteTable('donations', {
     createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
     completedAt: integer('completed_at', { mode: 'timestamp' }),
 });
-
-export const campaignNews = sqliteTable('campaign_news', {
-    campaignId: integer('campaign_id').references(() => campaigns.id).notNull(),
-    newsId: integer('news_id').references(() => news.id).notNull(),
-}, (t) => ({
-    pk: primaryKey({ columns: [t.campaignId, t.newsId] }),
-}));

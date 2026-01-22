@@ -81,6 +81,7 @@ auth.post('/register', async (c) => {
             throw dbError;
         }
     } catch (err) {
+        console.error("Register Error:", err);
         return c.json({ error: 'Error mendaftarkan user' }, 400);
     }
 });
