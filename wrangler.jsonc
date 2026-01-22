@@ -10,10 +10,6 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	"assets": {
-		// The path to the directory containing the `index.html` file to be served at `/`
-		"directory": "./public"
-	},
 	"observability": {
 		"enabled": true
 	},

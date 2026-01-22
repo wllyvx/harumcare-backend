@@ -16,6 +16,10 @@ export const connectDB = async (uri) => {
         const db = await mongoose.connect(uri, {
             // Buffer commands should be false for serverless to avoid hanging
             bufferCommands: false,
+            // Add connection timeout to prevent hanging (5 seconds)
+            serverSelectionTimeoutMS: 5000,
+            // Socket timeout
+            socketTimeoutMS: 10000,
         });
 
         isConnected = db.connections[0].readyState;

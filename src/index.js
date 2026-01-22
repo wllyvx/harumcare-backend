@@ -4,8 +4,8 @@ import { connectDB } from './db/connect.js';
 
 const app = new Hono();
 
-// Global Middleware
-app.use('/*', cors({
+// Global Middleware - CORS must use '*' to apply to all routes including sub-routes
+app.use('*', cors({
     origin: (origin) => origin || '*', // Allow all origins by reflecting them
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Custom-Header'],
@@ -16,16 +16,22 @@ app.use('/*', cors({
 
 
 
-// Database Connection Middleware
+// Database Connection Middleware - non-blocking
 app.use('*', async (c, next) => {
+    // Skip database connection for health check routes
+    if (c.req.path === '/' || c.req.path === '/health') {
+        return await next();
+    }
+
     if (!c.env.MONGODB_URI) {
         return c.json({ error: 'Server misconfiguration: MONGODB_URI missing' }, 500);
     }
-    try {
-        await connectDB(c.env.MONGODB_URI);
-    } catch (err) {
-        return c.json({ error: 'Database connection failed' }, 500);
-    }
+
+    // Try to connect to database, but don't block the request
+    connectDB(c.env.MONGODB_URI).catch(err => {
+        console.error('Database connection error:', err.message);
+    });
+
     await next();
 });
 
