@@ -2,18 +2,20 @@
 	"name": "harumcare-backend",
 	"version": "0.0.0",
 	"private": true,
+	"type": "module",
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev"
 	},
 	"devDependencies": {
+		"drizzle-kit": "^0.31.8",
 		"wrangler": "^4.59.3"
 	},
 	"dependencies": {
 		"bcryptjs": "^3.0.3",
+		"drizzle-orm": "^0.45.1",
 		"hono": "^4.11.4",
-		"jsonwebtoken": "^9.0.3",
-		"mongoose": "^9.1.5"
+		"jsonwebtoken": "^9.0.3"
 	}
 }

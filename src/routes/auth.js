@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import User from '../models/Users.js';
+import { eq, or } from 'drizzle-orm';
+import { users } from '../db/schema.js';
 import { authenticateToken, restrictToAdmin } from '../middleware/auth.js';
 
 const auth = new Hono();
@@ -10,6 +11,7 @@ const auth = new Hono();
 auth.post('/register-admin', authenticateToken, restrictToAdmin, async (c) => {
     try {
         const { nama, username, email, password, nomorHp, alamat, role } = await c.req.json();
+        const db = c.get('db');
 
         // Validasi input
         if (!nama || !username || !email || !password || !nomorHp) {
@@ -17,22 +19,26 @@ auth.post('/register-admin', authenticateToken, restrictToAdmin, async (c) => {
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        const user = new User({
-            nama,
-            username,
-            email,
-            password: hashedPassword,
-            nomorHp,
-            ...(alamat && { alamat }), // Hanya tambahkan alamat jika ada
-            role: role || 'admin'
-        });
-        await user.save();
-        return c.json({ message: 'Admin berhasil dibuat', userId: user._id }, 201);
-    } catch (err) {
-        if (err.code === 11000) {
-            const field = Object.keys(err.keyPattern)[0];
-            return c.json({ error: `${field} sudah digunakan` }, 400);
+
+        try {
+            const [newUser] = await db.insert(users).values({
+                nama,
+                username,
+                email,
+                password: hashedPassword,
+                nomorHp,
+                alamat: alamat || null,
+                role: role || 'admin'
+            }).returning();
+
+            return c.json({ message: 'Admin berhasil dibuat', userId: newUser.id }, 201);
+        } catch (dbError) {
+            if (dbError.message.includes('UNIQUE constraint failed')) {
+                return c.json({ error: 'Username atau email sudah digunakan' }, 400);
+            }
+            throw dbError;
         }
+    } catch (err) {
         return c.json({ error: 'Error membuat admin' }, 400);
     }
 });
@@ -41,6 +47,7 @@ auth.post('/register-admin', authenticateToken, restrictToAdmin, async (c) => {
 auth.post('/register', async (c) => {
     try {
         const { nama, username, email, password, nomorHp, alamat } = await c.req.json();
+        const db = c.get('db');
 
         // Validasi input
         if (!nama || !username || !email || !password || !nomorHp) {
@@ -54,22 +61,26 @@ auth.post('/register', async (c) => {
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        const user = new User({
-            nama,
-            username,
-            email,
-            password: hashedPassword,
-            nomorHp,
-            alamat,
-            role: 'user'
-        });
-        await user.save();
-        return c.json({ message: 'User berhasil terdaftar', userId: user._id }, 201);
-    } catch (err) {
-        if (err.code === 11000) {
-            const field = Object.keys(err.keyPattern)[0];
-            return c.json({ error: `${field} sudah digunakan` }, 400);
+
+        try {
+            const [newUser] = await db.insert(users).values({
+                nama,
+                username,
+                email,
+                password: hashedPassword,
+                nomorHp,
+                alamat,
+                role: 'user'
+            }).returning();
+
+            return c.json({ message: 'User berhasil terdaftar', userId: newUser.id }, 201);
+        } catch (dbError) {
+            if (dbError.message.includes('UNIQUE constraint failed')) {
+                return c.json({ error: 'Username atau email sudah digunakan' }, 400);
+            }
+            throw dbError;
         }
+    } catch (err) {
         return c.json({ error: 'Error mendaftarkan user' }, 400);
     }
 });
@@ -78,14 +89,15 @@ auth.post('/register', async (c) => {
 auth.post('/login', async (c) => {
     try {
         const { username, password } = await c.req.json();
+        const db = c.get('db');
 
         if (!username || !password) {
             return c.json({ error: 'Username dan password wajib diisi' }, 400);
         }
 
-        const user = await User.findOne({
-            $or: [{ username }, { email: username }]
-        });
+        const [user] = await db.select().from(users).where(
+            or(eq(users.username, username), eq(users.email, username))
+        ).limit(1);
 
         if (!user) {
             return c.json({ error: 'Username/email atau password salah' }, 401);
@@ -97,7 +109,7 @@ auth.post('/login', async (c) => {
         }
 
         const token = jwt.sign(
-            { userId: user._id, role: user.role, nama: user.nama },
+            { userId: user.id, role: user.role, nama: user.nama },
             c.env.JWT_SECRET || 'your_jwt_secret',
             { expiresIn: '24h' }
         );
@@ -105,7 +117,7 @@ auth.post('/login', async (c) => {
         return c.json({
             token,
             role: user.role,
-            userId: user._id,
+            userId: user.id,
             nama: user.nama,
             message: 'Login berhasil'
         });
@@ -119,7 +131,20 @@ auth.post('/login', async (c) => {
 auth.get('/profile', authenticateToken, async (c) => {
     try {
         const { userId } = c.get('user');
-        const user = await User.findById(userId).select('-password');
+        const db = c.get('db');
+
+        const [user] = await db.select({
+            id: users.id,
+            nama: users.nama,
+            username: users.username,
+            email: users.email,
+            nomorHp: users.nomorHp,
+            alamat: users.alamat,
+            role: users.role,
+            createdAt: users.createdAt,
+            updatedAt: users.updatedAt
+        }).from(users).where(eq(users.id, userId)).limit(1);
+
         if (!user) {
             return c.json({ error: 'User tidak ditemukan' }, 404);
         }
@@ -134,30 +159,42 @@ auth.put('/profile', authenticateToken, async (c) => {
     try {
         const { nama, email, nomorHp, alamat } = await c.req.json();
         const { userId } = c.get('user');
+        const db = c.get('db');
 
         const updateData = {};
         if (nama) updateData.nama = nama;
         if (email) updateData.email = email;
         if (nomorHp) updateData.nomorHp = nomorHp;
         if (alamat) updateData.alamat = alamat;
-        updateData.updatedAt = new Date();
+        updateData.updatedAt = new Date(); // timestamp will be handled by Drizzle if mapped or this is fine
 
-        const user = await User.findByIdAndUpdate(
-            userId,
-            updateData,
-            { new: true, runValidators: true }
-        ).select('-password');
+        try {
+            const [user] = await db.update(users)
+                .set(updateData)
+                .where(eq(users.id, userId))
+                .returning({
+                    id: users.id,
+                    nama: users.nama,
+                    username: users.username,
+                    email: users.email,
+                    nomorHp: users.nomorHp,
+                    alamat: users.alamat,
+                    role: users.role,
+                    updatedAt: users.updatedAt
+                });
 
-        if (!user) {
-            return c.json({ error: 'User tidak ditemukan' }, 404);
+            if (!user) {
+                return c.json({ error: 'User tidak ditemukan' }, 404);
+            }
+
+            return c.json({ message: 'Profile berhasil diupdate', user });
+        } catch (dbError) {
+            if (dbError.message.includes('UNIQUE constraint failed')) {
+                return c.json({ error: 'Email sudah digunakan' }, 400);
+            }
+            throw dbError;
         }
-
-        return c.json({ message: 'Profile berhasil diupdate', user });
     } catch (err) {
-        if (err.code === 11000) {
-            const field = Object.keys(err.keyPattern)[0];
-            return c.json({ error: `${field} sudah digunakan` }, 400);
-        }
         return c.json({ error: 'Error mengupdate profile' }, 400);
     }
 });

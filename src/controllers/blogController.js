@@ -1,38 +1,76 @@
-import Blog from "../models/Blog.js";
-import Campaign from "../models/Campaign.js";
+import { eq, desc, count, and } from 'drizzle-orm';
+import { blogs, users, campaigns } from '../db/schema.js';
+
+// Helper to map join result
+const mapBlogResult = (row) => {
+    if (!row) return null;
+    return {
+        ...row.blogs,
+        author: row.users ? {
+            nama: row.users.nama,
+            username: row.users.username
+        } : null,
+        campaignId: row.campaigns ? {
+            title: row.campaigns.title,
+            imageUrl: row.campaigns.imageUrl
+        } : null
+    };
+};
 
 // Get all blogs with pagination and filters
 export const getAllBlogs = async (c) => {
     try {
+        const db = c.get('db');
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');
         const category = c.req.query('category');
         const status = c.req.query('status');
-        const campaignId = c.req.query('campaignId');
+        const campaignId = parseInt(c.req.query('campaignId'));
 
-        const query = {};
+        const offset = (page - 1) * limit;
+
+        const filters = [];
         // Only filter by status if provided, otherwise show all
         if (status && status !== 'all') {
-            query.status = status;
+            filters.push(eq(blogs.status, status));
         } else if (!status) {
             // Default to published for public access
-            query.status = 'published';
+            filters.push(eq(blogs.status, 'published'));
         }
-        if (category) query.category = category;
-        if (campaignId) query.campaignId = campaignId;
+        if (category) filters.push(eq(blogs.category, category));
+        if (campaignId && !isNaN(campaignId)) filters.push(eq(blogs.campaignId, campaignId));
 
-        const totalBlogs = await Blog.countDocuments(query);
+        const whereClause = filters.length > 0 ? and(...filters) : undefined;
+
+        // Get total count
+        const [totalResult] = await db.select({ count: count() })
+            .from(blogs)
+            .where(whereClause);
+
+        const totalBlogs = totalResult.count;
         const totalPages = Math.ceil(totalBlogs / limit);
 
-        const blogs = await Blog.find(query)
-            .populate('author', 'nama username')
-            .populate('campaignId', 'title imageUrl')
-            .sort({ createdAt: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit);
+        const rows = await db.select({
+            blogs: blogs,
+            users: {
+                nama: users.nama,
+                username: users.username
+            },
+            campaigns: {
+                title: campaigns.title,
+                imageUrl: campaigns.imageUrl
+            }
+        })
+            .from(blogs)
+            .leftJoin(users, eq(blogs.authorId, users.id))
+            .leftJoin(campaigns, eq(blogs.campaignId, campaigns.id))
+            .where(whereClause)
+            .orderBy(desc(blogs.createdAt))
+            .limit(limit)
+            .offset(offset);
 
         return c.json({
-            blogs,
+            blogs: rows.map(mapBlogResult),
             currentPage: page,
             totalPages,
             totalBlogs
@@ -45,25 +83,44 @@ export const getAllBlogs = async (c) => {
 // Get single blog by slug
 export const getBlogBySlug = async (c) => {
     try {
-        const blog = await Blog.findOne({ slug: c.req.param('slug') })
-            .populate('author', 'nama username');
+        const db = c.get('db');
+        const slugParam = c.req.param('slug');
 
-        if (!blog) {
+        const [row] = await db.select({
+            blogs: blogs,
+            users: {
+                nama: users.nama,
+                username: users.username
+            }
+        })
+            .from(blogs)
+            .leftJoin(users, eq(blogs.authorId, users.id))
+            .where(eq(blogs.slug, slugParam))
+            .limit(1);
+
+        if (!row) {
             return c.json({ error: 'Blog tidak ditemukan' }, 404);
         }
 
-        // Get related campaign if blog has campaignId
-        let relatedCampaign = null;
-        if (blog.campaignId) {
-            relatedCampaign = await Campaign.findById(blog.campaignId);
-        }
+        const blogData = row.blogs;
 
         // Increment view count
-        blog.viewCount += 1;
-        await blog.save();
+        blogData.viewCount = (blogData.viewCount || 0) + 1;
+        await db.update(blogs).set({ viewCount: blogData.viewCount }).where(eq(blogs.id, blogData.id));
+
+        // Get related campaign if blog has campaignId
+        let relatedCampaign = null;
+        if (blogData.campaignId) {
+            const [camp] = await db.select().from(campaigns).where(eq(campaigns.id, blogData.campaignId));
+            relatedCampaign = camp || null;
+        }
 
         const blogWithCampaign = {
-            ...blog.toObject(),
+            ...blogData,
+            author: row.users ? {
+                nama: row.users.nama,
+                username: row.users.username
+            } : null,
             relatedCampaign
         };
 
@@ -76,6 +133,7 @@ export const getBlogBySlug = async (c) => {
 // Create new blog
 export const createBlog = async (c) => {
     try {
+        const db = c.get('db');
         const body = await c.req.json();
         const { title, content, category, image, status, campaignId } = body;
 
@@ -90,31 +148,27 @@ export const createBlog = async (c) => {
             return c.json({ error: 'User tidak terautentikasi dengan benar' }, 401);
         }
 
-        const blog = new Blog({
+        const [savedBlog] = await db.insert(blogs).values({
             title,
             slug,
             content,
             category,
             image,
             status,
-            author: user.userId,
-            campaignId: campaignId || null
-        });
+            authorId: user.userId,
+            campaignId: campaignId ? parseInt(campaignId) : null
+        }).returning();
 
-        const savedBlog = await blog.save();
+        // Populate author details (simulated or minimal return)
+        const responseData = {
+            ...savedBlog,
+            author: {
+                nama: user.nama,
+                username: user.role
+            }
+        };
 
-        // If campaignId is provided, add this blog to campaign's relatedBlogs array
-        if (campaignId) {
-            await Campaign.findByIdAndUpdate(
-                campaignId,
-                { $addToSet: { relatedBlogs: savedBlog._id } }
-            );
-        }
-
-        // Populate author details in response
-        const populatedBlog = await Blog.findById(savedBlog._id).populate('author', 'nama username');
-
-        return c.json(populatedBlog, 201);
+        return c.json(responseData, 201);
     } catch (error) {
         console.error('Create blog error:', error);
         return c.json({ error: error.message }, 400);
@@ -124,49 +178,40 @@ export const createBlog = async (c) => {
 // Update blog
 export const updateBlog = async (c) => {
     try {
+        const db = c.get('db');
+        const blogId = parseInt(c.req.param('id'));
+        if (isNaN(blogId)) return c.json({ error: 'Invalid ID' }, 400);
+
         const body = await c.req.json();
         const { title, content, category, image, status, campaignId } = body;
-        const blog = await Blog.findById(c.req.param('id'));
 
-        if (!blog) {
+        const [existingBlog] = await db.select().from(blogs).where(eq(blogs.id, blogId));
+
+        if (!existingBlog) {
             return c.json({ error: 'Blog tidak ditemukan' }, 404);
         }
 
         const user = c.get('user');
         // Check if user is author or admin
-        if (blog.author.toString() !== user.userId && user.role !== 'admin') {
+        if (existingBlog.authorId !== user.userId && user.role !== 'admin') {
             return c.json({ error: 'Tidak memiliki izin untuk mengubah blog ini' }, 403);
         }
 
-        // Handle campaignId update
-        if (campaignId !== undefined) {
-            // Remove from old campaign if exists
-            if (blog.campaignId && blog.campaignId.toString() !== campaignId) {
-                await Campaign.findByIdAndUpdate(
-                    blog.campaignId,
-                    { $pull: { relatedBlogs: blog._id } }
-                );
-            }
+        const updateData = {};
+        if (title) updateData.title = title;
+        if (content) updateData.content = content;
+        if (category) updateData.category = category;
+        if (image) updateData.image = image;
+        if (status) updateData.status = status;
+        if (campaignId !== undefined) updateData.campaignId = campaignId ? parseInt(campaignId) : null;
+        updateData.updatedAt = new Date();
 
-            // Add to new campaign if provided
-            if (campaignId) {
-                await Campaign.findByIdAndUpdate(
-                    campaignId,
-                    { $addToSet: { relatedBlogs: blog._id } }
-                );
-            }
+        const [updatedBlog] = await db.update(blogs)
+            .set(updateData)
+            .where(eq(blogs.id, blogId))
+            .returning();
 
-            blog.campaignId = campaignId || null;
-        }
-
-        blog.title = title || blog.title;
-        blog.content = content || blog.content;
-        blog.category = category || blog.category;
-        blog.image = image || blog.image;
-        blog.status = status || blog.status;
-
-        await blog.save();
-        return c.json(blog);
+        return c.json(updatedBlog);
     } catch (error) {
         return c.json({ error: error.message }, 400);
     }
@@ -175,27 +220,23 @@ export const updateBlog = async (c) => {
 // Delete blog
 export const deleteBlog = async (c) => {
     try {
-        const blog = await Blog.findById(c.req.param('id'));
+        const db = c.get('db');
+        const blogId = parseInt(c.req.param('id'));
+        if (isNaN(blogId)) return c.json({ error: 'Invalid ID' }, 400);
 
-        if (!blog) {
+        const [existingBlog] = await db.select().from(blogs).where(eq(blogs.id, blogId));
+
+        if (!existingBlog) {
             return c.json({ error: 'Blog tidak ditemukan' }, 404);
         }
 
         const user = c.get('user');
         // Check if user is author or admin
-        if (blog.author.toString() !== user.userId && user.role !== 'admin') {
+        if (existingBlog.authorId !== user.userId && user.role !== 'admin') {
             return c.json({ error: 'Tidak memiliki izin untuk menghapus blog ini' }, 403);
         }
 
-        // Remove from campaign's relatedBlogs array if exists
-        if (blog.campaignId) {
-            await Campaign.findByIdAndUpdate(
-                blog.campaignId,
-                { $pull: { relatedBlogs: blog._id } }
-            );
-        }
-
-        await blog.deleteOne();
+        await db.delete(blogs).where(eq(blogs.id, blogId));
         return c.json({ message: 'Blog berhasil dihapus' });
     } catch (error) {
         return c.json({ error: error.message }, 500);
@@ -205,19 +246,32 @@ export const deleteBlog = async (c) => {
 // Get latest blogs
 export const getLatestBlogs = async (c) => {
     try {
+        const db = c.get('db');
         const limit = parseInt(c.req.query('limit') || '5');
-        const campaignId = c.req.query('campaignId');
+        const campaignId = parseInt(c.req.query('campaignId'));
 
-        const query = { status: 'published' };
-        if (campaignId) query.campaignId = campaignId;
+        const filters = [eq(blogs.status, 'published')];
+        if (campaignId && !isNaN(campaignId)) filters.push(eq(blogs.campaignId, campaignId));
 
-        const blogs = await Blog.find(query)
-            .populate('author', 'nama username')
-            .populate('campaignId', 'title imageUrl')
-            .sort({ createdAt: -1 })
+        const rows = await db.select({
+            blogs: blogs,
+            users: {
+                nama: users.nama,
+                username: users.username
+            },
+            campaigns: {
+                title: campaigns.title,
+                imageUrl: campaigns.imageUrl
+            }
+        })
+            .from(blogs)
+            .leftJoin(users, eq(blogs.authorId, users.id))
+            .leftJoin(campaigns, eq(blogs.campaignId, campaigns.id))
+            .where(and(...filters))
+            .orderBy(desc(blogs.createdAt))
             .limit(limit);
 
-        return c.json(blogs);
+        return c.json(rows.map(mapBlogResult));
     } catch (error) {
         return c.json({ error: error.message }, 500);
     }
@@ -226,27 +280,45 @@ export const getLatestBlogs = async (c) => {
 // Get blogs by campaign
 export const getBlogsByCampaign = async (c) => {
     try {
-        const campaignId = c.req.param('campaignId');
+        const db = c.get('db');
+        const campaignId = parseInt(c.req.param('campaignId'));
+        if (isNaN(campaignId)) return c.json({ error: 'Invalid Campaign ID' }, 400);
+
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');
+        const offset = (page - 1) * limit;
 
-        const query = {
-            campaignId: campaignId,
-            status: 'published'
-        };
+        const filters = [
+            eq(blogs.campaignId, campaignId),
+            eq(blogs.status, 'published')
+        ];
+        const whereClause = and(...filters);
 
-        const totalBlogs = await Blog.countDocuments(query);
+        const [totalResult] = await db.select({ count: count() }).from(blogs).where(whereClause);
+        const totalBlogs = totalResult.count;
         const totalPages = Math.ceil(totalBlogs / limit);
 
-        const blogs = await Blog.find(query)
-            .populate('author', 'nama username')
-            .populate('campaignId', 'title imageUrl')
-            .sort({ createdAt: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit);
+        const rows = await db.select({
+            blogs: blogs,
+            users: {
+                nama: users.nama,
+                username: users.username
+            },
+            campaigns: {
+                title: campaigns.title,
+                imageUrl: campaigns.imageUrl
+            }
+        })
+            .from(blogs)
+            .leftJoin(users, eq(blogs.authorId, users.id))
+            .leftJoin(campaigns, eq(blogs.campaignId, campaigns.id))
+            .where(whereClause)
+            .orderBy(desc(blogs.createdAt))
+            .limit(limit)
+            .offset(offset);
 
         return c.json({
-            blogs,
+            blogs: rows.map(mapBlogResult),
             currentPage: page,
             totalPages,
             totalBlogs
@@ -259,8 +331,9 @@ export const getBlogsByCampaign = async (c) => {
 // Get all categories
 export const getCategories = async (c) => {
     try {
-        const categories = await Blog.distinct('category');
-        return c.json(categories);
+        const db = c.get('db');
+        const categories = await db.selectDistinct({ category: blogs.category }).from(blogs);
+        return c.json(categories.map(c => c.category));
     } catch (error) {
         return c.json({ error: error.message }, 500);
     }

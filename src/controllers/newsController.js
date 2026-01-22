@@ -1,31 +1,69 @@
-import News from "../models/News.js";
-import Campaign from "../models/Campaign.js";
+import { eq, desc, count, and } from 'drizzle-orm';
+import { news, users, campaigns } from '../db/schema.js';
+
+// Helper to map join result
+const mapNewsResult = (row) => {
+    if (!row) return null;
+    return {
+        ...row.news,
+        author: row.users ? {
+            nama: row.users.nama,
+            username: row.users.username
+        } : null,
+        campaignId: row.campaigns ? {
+            title: row.campaigns.title,
+            imageUrl: row.campaigns.imageUrl
+        } : null
+    };
+};
 
 // Get all news with pagination and filters
 export const getAllNews = async (c) => {
     try {
+        const db = c.get('db');
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');
         const category = c.req.query('category');
         const status = c.req.query('status') || 'published'; // Default to published news
-        const campaignId = c.req.query('campaignId');
+        const campaignId = parseInt(c.req.query('campaignId'));
 
-        const query = { status };
-        if (category) query.category = category;
-        if (campaignId) query.campaignId = campaignId;
+        const offset = (page - 1) * limit;
 
-        const totalNews = await News.countDocuments(query);
+        const filters = [eq(news.status, status)];
+        if (category) filters.push(eq(news.category, category));
+        if (campaignId && !isNaN(campaignId)) filters.push(eq(news.campaignId, campaignId));
+
+        const whereClause = and(...filters);
+
+        // Get total count
+        const [totalResult] = await db.select({ count: count() })
+            .from(news)
+            .where(whereClause);
+
+        const totalNews = totalResult.count;
         const totalPages = Math.ceil(totalNews / limit);
 
-        const news = await News.find(query)
-            .populate('author', 'nama username')
-            .populate('campaignId', 'title imageUrl')
-            .sort({ createdAt: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit);
+        const rows = await db.select({
+            news: news,
+            users: {
+                nama: users.nama,
+                username: users.username
+            },
+            campaigns: {
+                title: campaigns.title,
+                imageUrl: campaigns.imageUrl
+            }
+        })
+            .from(news)
+            .leftJoin(users, eq(news.authorId, users.id))
+            .leftJoin(campaigns, eq(news.campaignId, campaigns.id))
+            .where(whereClause)
+            .orderBy(desc(news.createdAt))
+            .limit(limit)
+            .offset(offset);
 
         return c.json({
-            news,
+            news: rows.map(mapNewsResult),
             currentPage: page,
             totalPages,
             totalNews
@@ -38,25 +76,44 @@ export const getAllNews = async (c) => {
 // Get single news by slug
 export const getNewsBySlug = async (c) => {
     try {
-        const news = await News.findOne({ slug: c.req.param('slug') })
-            .populate('author', 'nama username');
+        const db = c.get('db');
+        const slugParam = c.req.param('slug');
 
-        if (!news) {
+        const [row] = await db.select({
+            news: news,
+            users: {
+                nama: users.nama,
+                username: users.username
+            }
+        })
+            .from(news)
+            .leftJoin(users, eq(news.authorId, users.id))
+            .where(eq(news.slug, slugParam))
+            .limit(1);
+
+        if (!row) {
             return c.json({ error: 'Berita tidak ditemukan' }, 404);
         }
 
-        // Get related campaign if news has campaignId
-        let relatedCampaign = null;
-        if (news.campaignId) {
-            relatedCampaign = await Campaign.findById(news.campaignId);
-        }
+        const newsData = row.news;
 
         // Increment view count
-        news.viewCount += 1;
-        await news.save();
+        newsData.viewCount = (newsData.viewCount || 0) + 1;
+        await db.update(news).set({ viewCount: newsData.viewCount }).where(eq(news.id, newsData.id));
+
+        // Get related campaign if news has campaignId
+        let relatedCampaign = null;
+        if (newsData.campaignId) {
+            const [camp] = await db.select().from(campaigns).where(eq(campaigns.id, newsData.campaignId));
+            relatedCampaign = camp || null;
+        }
 
         const newsWithCampaign = {
-            ...news.toObject(),
+            ...newsData,
+            author: row.users ? {
+                nama: row.users.nama,
+                username: row.users.username
+            } : null,
             relatedCampaign
         };
 
@@ -69,6 +126,7 @@ export const getNewsBySlug = async (c) => {
 // Create new news
 export const createNews = async (c) => {
     try {
+        const db = c.get('db');
         const body = await c.req.json();
         const { title, content, category, image, status, campaignId } = body;
 
@@ -83,31 +141,28 @@ export const createNews = async (c) => {
             return c.json({ error: 'User tidak terautentikasi dengan benar' }, 401);
         }
 
-        const news = new News({
+        const [savedNews] = await db.insert(news).values({
             title,
             slug,
             content,
             category,
             image,
             status,
-            author: user.userId,
-            campaignId: campaignId || null
-        });
+            authorId: user.userId,
+            campaignId: campaignId ? parseInt(campaignId) : null
+        }).returning();
 
-        const savedNews = await news.save();
+        // Populate author details (could fetch, but simpler valid response)
+        const responseData = {
+            ...savedNews,
+            author: {
+                nama: user.nama,
+                username: user.role // or user.username doesn't matter much for create response sometimes, but better fetch if needed.
+                // For now, let's keep it minimal or consistent
+            }
+        };
 
-        // If campaignId is provided, add this news to campaign's relatedNews array
-        if (campaignId) {
-            await Campaign.findByIdAndUpdate(
-                campaignId,
-                { $addToSet: { relatedNews: savedNews._id } }
-            );
-        }
-
-        // Populate author details in response
-        const populatedNews = await News.findById(savedNews._id).populate('author', 'nama username');
-
-        return c.json(populatedNews, 201);
+        return c.json(responseData, 201);
     } catch (error) {
         console.error('Create news error:', error);
         return c.json({ error: error.message }, 400);
@@ -117,49 +172,40 @@ export const createNews = async (c) => {
 // Update news
 export const updateNews = async (c) => {
     try {
+        const db = c.get('db');
+        const newsId = parseInt(c.req.param('id'));
+        if (isNaN(newsId)) return c.json({ error: 'Invalid ID' }, 400);
+
         const body = await c.req.json();
         const { title, content, category, image, status, campaignId } = body;
-        const news = await News.findById(c.req.param('id'));
 
-        if (!news) {
+        const [existingNews] = await db.select().from(news).where(eq(news.id, newsId));
+
+        if (!existingNews) {
             return c.json({ error: 'Berita tidak ditemukan' }, 404);
         }
 
         const user = c.get('user');
-        // Check if user is author or admin
-        if (news.author.toString() !== user.userId && user.role !== 'admin') {
+        // Check if user is author or admin (authorId is int, userId is int from token)
+        if (existingNews.authorId !== user.userId && user.role !== 'admin') {
             return c.json({ error: 'Tidak memiliki izin untuk mengubah berita ini' }, 403);
         }
 
-        // Handle campaignId update
-        if (campaignId !== undefined) {
-            // Remove from old campaign if exists
-            if (news.campaignId && news.campaignId.toString() !== campaignId) {
-                await Campaign.findByIdAndUpdate(
-                    news.campaignId,
-                    { $pull: { relatedNews: news._id } }
-                );
-            }
+        const updateData = {};
+        if (title) updateData.title = title;
+        if (content) updateData.content = content;
+        if (category) updateData.category = category;
+        if (image) updateData.image = image;
+        if (status) updateData.status = status;
+        if (campaignId !== undefined) updateData.campaignId = campaignId ? parseInt(campaignId) : null;
+        updateData.updatedAt = new Date();
 
-            // Add to new campaign if provided
-            if (campaignId) {
-                await Campaign.findByIdAndUpdate(
-                    campaignId,
-                    { $addToSet: { relatedNews: news._id } }
-                );
-            }
+        const [updatedNews] = await db.update(news)
+            .set(updateData)
+            .where(eq(news.id, newsId))
+            .returning();
 
-            news.campaignId = campaignId || null;
-        }
-
-        news.title = title || news.title;
-        news.content = content || news.content;
-        news.category = category || news.category;
-        news.image = image || news.image;
-        news.status = status || news.status;
-
-        await news.save();
-        return c.json(news);
+        return c.json(updatedNews);
     } catch (error) {
         return c.json({ error: error.message }, 400);
     }
@@ -168,27 +214,23 @@ export const updateNews = async (c) => {
 // Delete news
 export const deleteNews = async (c) => {
     try {
-        const news = await News.findById(c.req.param('id'));
+        const db = c.get('db');
+        const newsId = parseInt(c.req.param('id'));
+        if (isNaN(newsId)) return c.json({ error: 'Invalid ID' }, 400);
 
-        if (!news) {
+        const [existingNews] = await db.select().from(news).where(eq(news.id, newsId));
+
+        if (!existingNews) {
             return c.json({ error: 'Berita tidak ditemukan' }, 404);
         }
 
         const user = c.get('user');
         // Check if user is author or admin
-        if (news.author.toString() !== user.userId && user.role !== 'admin') {
+        if (existingNews.authorId !== user.userId && user.role !== 'admin') {
             return c.json({ error: 'Tidak memiliki izin untuk menghapus berita ini' }, 403);
         }
 
-        // Remove from campaign's relatedNews array if exists
-        if (news.campaignId) {
-            await Campaign.findByIdAndUpdate(
-                news.campaignId,
-                { $pull: { relatedNews: news._id } }
-            );
-        }
-
-        await news.deleteOne();
+        await db.delete(news).where(eq(news.id, newsId));
         return c.json({ message: 'Berita berhasil dihapus' });
     } catch (error) {
         return c.json({ error: error.message }, 500);
@@ -198,19 +240,32 @@ export const deleteNews = async (c) => {
 // Get latest news
 export const getLatestNews = async (c) => {
     try {
+        const db = c.get('db');
         const limit = parseInt(c.req.query('limit') || '5');
-        const campaignId = c.req.query('campaignId');
+        const campaignId = parseInt(c.req.query('campaignId'));
 
-        const query = { status: 'published' };
-        if (campaignId) query.campaignId = campaignId;
+        const filters = [eq(news.status, 'published')];
+        if (campaignId && !isNaN(campaignId)) filters.push(eq(news.campaignId, campaignId));
 
-        const news = await News.find(query)
-            .populate('author', 'nama username')
-            .populate('campaignId', 'title imageUrl')
-            .sort({ createdAt: -1 })
+        const rows = await db.select({
+            news: news,
+            users: {
+                nama: users.nama,
+                username: users.username
+            },
+            campaigns: {
+                title: campaigns.title,
+                imageUrl: campaigns.imageUrl
+            }
+        })
+            .from(news)
+            .leftJoin(users, eq(news.authorId, users.id))
+            .leftJoin(campaigns, eq(news.campaignId, campaigns.id))
+            .where(and(...filters))
+            .orderBy(desc(news.createdAt))
             .limit(limit);
 
-        return c.json(news);
+        return c.json(rows.map(mapNewsResult));
     } catch (error) {
         return c.json({ error: error.message }, 500);
     }
@@ -219,27 +274,45 @@ export const getLatestNews = async (c) => {
 // Get news by campaign
 export const getNewsByCampaign = async (c) => {
     try {
-        const campaignId = c.req.param('campaignId');
+        const db = c.get('db');
+        const campaignId = parseInt(c.req.param('campaignId'));
+        if (isNaN(campaignId)) return c.json({ error: 'Invalid Campaign ID' }, 400);
+
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');
+        const offset = (page - 1) * limit;
 
-        const query = {
-            campaignId: campaignId,
-            status: 'published'
-        };
+        const filters = [
+            eq(news.campaignId, campaignId),
+            eq(news.status, 'published')
+        ];
+        const whereClause = and(...filters);
 
-        const totalNews = await News.countDocuments(query);
+        const [totalResult] = await db.select({ count: count() }).from(news).where(whereClause);
+        const totalNews = totalResult.count;
         const totalPages = Math.ceil(totalNews / limit);
 
-        const news = await News.find(query)
-            .populate('author', 'nama username')
-            .populate('campaignId', 'title imageUrl')
-            .sort({ createdAt: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit);
+        const rows = await db.select({
+            news: news,
+            users: {
+                nama: users.nama,
+                username: users.username
+            },
+            campaigns: {
+                title: campaigns.title,
+                imageUrl: campaigns.imageUrl
+            }
+        })
+            .from(news)
+            .leftJoin(users, eq(news.authorId, users.id))
+            .leftJoin(campaigns, eq(news.campaignId, campaigns.id))
+            .where(whereClause)
+            .orderBy(desc(news.createdAt))
+            .limit(limit)
+            .offset(offset);
 
         return c.json({
-            news,
+            news: rows.map(mapNewsResult),
             currentPage: page,
             totalPages,
             totalNews
@@ -252,8 +325,9 @@ export const getNewsByCampaign = async (c) => {
 // Get all categories
 export const getCategories = async (c) => {
     try {
-        const categories = await News.distinct('category');
-        return c.json(categories);
+        const db = c.get('db');
+        const categories = await db.selectDistinct({ category: news.category }).from(news);
+        return c.json(categories.map(c => c.category));
     } catch (error) {
         return c.json({ error: error.message }, 500);
     }

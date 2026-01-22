@@ -16,21 +16,20 @@ app.use('*', cors({
 
 
 
-// Database Connection Middleware - non-blocking
+// Database Connection Middleware
 app.use('*', async (c, next) => {
     // Skip database connection for health check routes
     if (c.req.path === '/' || c.req.path === '/health') {
         return await next();
     }
 
-    if (!c.env.MONGODB_URI) {
-        return c.json({ error: 'Server misconfiguration: MONGODB_URI missing' }, 500);
+    if (!c.env.DB) {
+        return c.json({ error: 'Server misconfiguration: DB binding missing' }, 500);
     }
 
-    // Try to connect to database, but don't block the request
-    connectDB(c.env.MONGODB_URI).catch(err => {
-        console.error('Database connection error:', err.message);
-    });
+    // Initialize Drizzle client and attach to context
+    const db = createDbClient(c.env.DB);
+    c.set('db', db);
 
     await next();
 });

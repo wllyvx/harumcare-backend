@@ -1,64 +1,78 @@
-import Campaign from "../models/Campaign.js";
-import Donation from "../models/Donations.js";
-import News from "../models/News.js";
+import { eq, desc, sql, count, sum, and, gte, lt } from 'drizzle-orm';
+import { campaigns, news, donations } from '../db/schema.js';
 
 export const getAllCampaigns = async (c) => {
     try {
-        const page = parseInt(c.req.query('page') || '1');
+        const db = c.get('db');
+        const queryPage = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '100');
         const category = c.req.query('category');
         const status = c.req.query('status');
 
-        let filter = {};
+        const offset = (queryPage - 1) * limit;
 
-        // Filter by category
+        const filters = [];
         if (category) {
-            filter.category = category;
+            filters.push(eq(campaigns.category, category));
         }
 
-        // Filter by status
+        const now = new Date();
         if (status === 'active') {
-            filter.endDate = { $gte: new Date() };
+            filters.push(gte(campaigns.endDate, now));
         } else if (status === 'ended') {
-            filter.endDate = { $lt: new Date() };
+            filters.push(lt(campaigns.endDate, now));
         }
 
-        const campaigns = await Campaign.find(filter)
-            .sort({ createdAt: -1 })
-            .limit(limit)
-            .skip((page - 1) * limit);
+        const whereClause = filters.length > 0 ? and(...filters) : undefined;
 
-        const total = await Campaign.countDocuments(filter);
+        const campaignsList = await db.select()
+            .from(campaigns)
+            .where(whereClause)
+            .orderBy(desc(campaigns.createdAt))
+            .limit(limit)
+            .offset(offset);
+
+        // Get total count for pagination
+        const [totalResult] = await db.select({ count: count() })
+            .from(campaigns)
+            .where(whereClause);
+
+        const total = totalResult.count;
 
         return c.json({
-            campaigns,
+            campaigns: campaignsList,
             totalPages: Math.ceil(total / limit),
-            currentPage: page,
+            currentPage: queryPage,
             total
         });
     } catch (err) {
         console.error('Error getting campaigns:', err);
-        return c.json({ error: 'Server error' }, 500);
+        return c.json({ error: 'Server error: ' + err.message }, 500);
     }
 };
 
 export const getCampaignById = async (c) => {
     try {
-        const campaign = await Campaign.findById(c.req.param('id'));
+        const db = c.get('db');
+        const id = parseInt(c.req.param('id'));
+        if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
+
+        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, id));
         if (!campaign) {
             return c.json({ error: 'Campaign tidak ditemukan' }, 404);
         }
 
         // Get related news for this campaign
-        const relatedNews = await News.find({
-            campaignId: campaign._id,
-            status: 'published'
-        }).sort({ createdAt: -1 }).limit(5);
+        const relatedNews = await db.select()
+            .from(news)
+            .where(and(eq(news.campaignId, id), eq(news.status, 'published')))
+            .orderBy(desc(news.createdAt))
+            .limit(5);
 
         // Add status based on end date
         const campaignWithStatus = {
-            ...campaign.toObject(),
-            status: new Date() > campaign.endDate ? 'ended' : 'active',
+            ...campaign,
+            status: new Date() > new Date(campaign.endDate) ? 'ended' : 'active',
             progress: campaign.targetAmount > 0 ? (campaign.currentAmount / campaign.targetAmount) * 100 : 0,
             relatedNews
         };
@@ -72,6 +86,7 @@ export const getCampaignById = async (c) => {
 
 export const createCampaign = async (c) => {
     try {
+        const db = c.get('db');
         const body = await c.req.json();
         const {
             title,
@@ -98,22 +113,21 @@ export const createCampaign = async (c) => {
             return c.json({ error: 'End date harus di masa depan' }, 400);
         }
 
-        const campaign = new Campaign({
+        const [newCampaign] = await db.insert(campaigns).values({
             title,
             description,
             imageUrl,
             targetAmount,
-            startDate: startDate || new Date(),
-            endDate,
+            startDate: startDate ? new Date(startDate) : new Date(),
+            endDate: new Date(endDate),
             organizationName,
             organizationLogo,
             category
-        });
+        }).returning();
 
-        await campaign.save();
         return c.json({
             message: 'Campaign berhasil dibuat',
-            campaign
+            campaign: newCampaign
         }, 201);
     } catch (err) {
         console.error('Error creating campaign:', err);
@@ -123,13 +137,14 @@ export const createCampaign = async (c) => {
 
 export const updateCampaign = async (c) => {
     try {
-        const campaignId = c.req.param('id');
-        const updateData = await c.req.json();
+        const db = c.get('db');
+        const campaignId = parseInt(c.req.param('id'));
+        if (isNaN(campaignId)) return c.json({ error: 'Invalid ID' }, 400);
+
+        const updateDataRaw = await c.req.json();
 
         // Remove fields that shouldn't be updated directly
-        delete updateData.currentAmount;
-        delete updateData.donorCount;
-        delete updateData.createdAt;
+        const { currentAmount, donorCount, createdAt, id, ...updateData } = updateDataRaw;
 
         // Validate endDate if provided
         if (updateData.endDate && new Date(updateData.endDate) <= new Date()) {
@@ -141,11 +156,14 @@ export const updateCampaign = async (c) => {
             return c.json({ error: 'Target amount harus lebih dari 0' }, 400);
         }
 
-        const campaign = await Campaign.findByIdAndUpdate(
-            campaignId,
-            updateData,
-            { new: true, runValidators: true }
-        );
+        // Handle dates
+        if (updateData.startDate) updateData.startDate = new Date(updateData.startDate);
+        if (updateData.endDate) updateData.endDate = new Date(updateData.endDate);
+
+        const [campaign] = await db.update(campaigns)
+            .set(updateData)
+            .where(eq(campaigns.id, campaignId))
+            .returning();
 
         if (!campaign) {
             return c.json({ error: 'Campaign tidak ditemukan' }, 404);
@@ -163,7 +181,11 @@ export const updateCampaign = async (c) => {
 
 export const deleteCampaign = async (c) => {
     try {
-        const campaign = await Campaign.findById(c.req.param('id'));
+        const db = c.get('db');
+        const campaignId = parseInt(c.req.param('id'));
+        if (isNaN(campaignId)) return c.json({ error: 'Invalid ID' }, 400);
+
+        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
 
         if (!campaign) {
             return c.json({ error: 'Campaign tidak ditemukan' }, 404);
@@ -176,9 +198,10 @@ export const deleteCampaign = async (c) => {
         }
 
         // Also delete related donations to maintain data integrity
-        await Donation.deleteMany({ campaignId: c.req.param('id') });
+        await db.delete(donations).where(eq(donations.campaignId, campaignId));
 
-        await Campaign.findByIdAndDelete(c.req.param('id'));
+        await db.delete(campaigns).where(eq(campaigns.id, campaignId));
+
         return c.json({
             message: 'Campaign berhasil dihapus',
             warning: campaign.currentAmount > 0 ? 'Campaign yang dihapus memiliki donasi yang juga akan dihapus' : null
@@ -191,29 +214,26 @@ export const deleteCampaign = async (c) => {
 
 export const getCampaignStats = async (c) => {
     try {
-        const stats = await Campaign.aggregate([
-            {
-                $group: {
-                    _id: null,
-                    totalCampaigns: { $sum: 1 },
-                    totalTargetAmount: { $sum: '$targetAmount' },
-                    totalCurrentAmount: { $sum: '$currentAmount' },
-                    totalDonors: { $sum: '$donorCount' },
-                    activeCampaigns: {
-                        $sum: {
-                            $cond: [{ $gte: ['$endDate', new Date()] }, 1, 0]
-                        }
-                    }
-                }
-            }
-        ]);
+        const db = c.get('db');
 
-        return c.json(stats[0] || {
-            totalCampaigns: 0,
-            totalTargetAmount: 0,
-            totalCurrentAmount: 0,
-            totalDonors: 0,
-            activeCampaigns: 0
+        const [totalStats] = await db.select({
+            totalCampaigns: count(),
+            totalTargetAmount: sum(campaigns.targetAmount),
+            totalCurrentAmount: sum(campaigns.currentAmount),
+            totalDonors: sum(campaigns.donorCount)
+        }).from(campaigns);
+
+        const now = new Date();
+        const [activeStats] = await db.select({
+            activeCampaigns: count()
+        }).from(campaigns).where(gte(campaigns.endDate, now));
+
+        return c.json({
+            totalCampaigns: Number(totalStats?.totalCampaigns || 0),
+            totalTargetAmount: Number(totalStats?.totalTargetAmount || 0),
+            totalCurrentAmount: Number(totalStats?.totalCurrentAmount || 0),
+            totalDonors: Number(totalStats?.totalDonors || 0),
+            activeCampaigns: Number(activeStats?.activeCampaigns || 0)
         });
     } catch (err) {
         console.error('Error getting campaign stats:', err);

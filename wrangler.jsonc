@@ -14,13 +14,20 @@
 		"enabled": true
 	},
 	"vars": {
-		// "MONGODB_URI": "your_mongodb_connection_string",
 		// "JWT_SECRET": "your_jwt_secret"
 	},
 	"r2_buckets": [
 		{
 			"binding": "BUCKET",
 			"bucket_name": "harumcare-uploads"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "harumcare-db",
+			"database_id": "caeb1120-8916-b7b9-a132e3c96b6a",
+			"migrations_dir": "drizzle"
 		}
 	]
 }
