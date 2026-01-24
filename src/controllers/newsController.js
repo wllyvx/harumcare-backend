@@ -1,5 +1,6 @@
 import { eq, desc, count, and } from 'drizzle-orm';
 import { news, users, campaigns } from '../db/schema.js';
+import { deleteFromR2 } from '../utils/r2.js';
 
 // Helper to map join result
 const mapNewsResult = (row) => {
@@ -205,6 +206,10 @@ export const updateNews = async (c) => {
             .where(eq(news.id, newsId))
             .returning();
 
+        if (updatedNews && image && existingNews.image && image !== existingNews.image) {
+            await deleteFromR2(c, existingNews.image);
+        }
+
         return c.json(updatedNews);
     } catch (error) {
         return c.json({ error: error.message }, 400);
@@ -228,6 +233,10 @@ export const deleteNews = async (c) => {
         // Check if user is author or admin
         if (existingNews.authorId !== user.userId && user.role !== 'admin') {
             return c.json({ error: 'Tidak memiliki izin untuk menghapus berita ini' }, 403);
+        }
+
+        if (existingNews.image) {
+            await deleteFromR2(c, existingNews.image);
         }
 
         await db.delete(news).where(eq(news.id, newsId));

@@ -1,5 +1,6 @@
 import { eq, desc, sql, count, sum, and, gte, lt } from 'drizzle-orm';
 import { campaigns, news, donations } from '../db/schema.js';
+import { deleteFromR2 } from '../utils/r2.js';
 
 export const getAllCampaigns = async (c) => {
     try {
@@ -160,10 +161,27 @@ export const updateCampaign = async (c) => {
         if (updateData.startDate) updateData.startDate = new Date(updateData.startDate);
         if (updateData.endDate) updateData.endDate = new Date(updateData.endDate);
 
+        // Fetch existing campaign to check for image changes
+        const [existingCampaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
+        if (!existingCampaign) {
+            return c.json({ error: 'Campaign tidak ditemukan' }, 404);
+        }
+
         const [campaign] = await db.update(campaigns)
             .set(updateData)
             .where(eq(campaigns.id, campaignId))
             .returning();
+
+        if (campaign) {
+            // If imageUrl changed, delete the old one
+            if (updateData.imageUrl && existingCampaign.imageUrl && updateData.imageUrl !== existingCampaign.imageUrl) {
+                await deleteFromR2(c, existingCampaign.imageUrl);
+            }
+            // If organizationLogo changed, delete the old one
+            if (updateData.organizationLogo && existingCampaign.organizationLogo && updateData.organizationLogo !== existingCampaign.organizationLogo) {
+                await deleteFromR2(c, existingCampaign.organizationLogo);
+            }
+        }
 
         if (!campaign) {
             return c.json({ error: 'Campaign tidak ditemukan' }, 404);
@@ -195,6 +213,18 @@ export const deleteCampaign = async (c) => {
         if (campaign.currentAmount > 0) {
             // Allow deletion but with warning - admin should be aware of consequences
             console.warn(`Admin is deleting campaign "${campaign.title}" with ${campaign.currentAmount} in donations and ${campaign.donorCount} donors`);
+        }
+
+        // Delete images from R2
+        if (campaign.imageUrl) await deleteFromR2(c, campaign.imageUrl);
+        if (campaign.organizationLogo) await deleteFromR2(c, campaign.organizationLogo);
+
+        // Also delete related donations images (proofOfTransfer)
+        const campaignDonations = await db.select().from(donations).where(eq(donations.campaignId, campaignId));
+        for (const donation of campaignDonations) {
+            if (donation.proofOfTransfer) {
+                await deleteFromR2(c, donation.proofOfTransfer);
+            }
         }
 
         // Also delete related donations to maintain data integrity
