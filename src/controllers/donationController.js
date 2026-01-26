@@ -1,5 +1,6 @@
 import { eq, desc, and, sql, sum, count } from 'drizzle-orm';
 import { donations, campaigns, users } from '../db/schema.js';
+import { deleteFromR2 } from '../utils/r2.js';
 
 // Helper to update campaign stats (currentAmount and donorCount)
 const updateCampaignStats = async (db, campaignId) => {
@@ -153,6 +154,10 @@ export const updateDonationProof = async (c) => {
             .set({ proofOfTransfer })
             .where(eq(donations.id, donationId))
             .returning();
+
+        if (updatedDonation && donation.proofOfTransfer && proofOfTransfer !== donation.proofOfTransfer) {
+            await deleteFromR2(c, donation.proofOfTransfer);
+        }
 
         return c.json({ message: "Bukti transfer berhasil diunggah", donation: updatedDonation });
     } catch (err) {
@@ -467,6 +472,10 @@ export const deleteDonation = async (c) => {
         const [donation] = await db.select().from(donations).where(eq(donations.id, id));
         if (!donation) {
             return c.json({ error: 'Donasi tidak ditemukan' }, 404);
+        }
+
+        if (donation.proofOfTransfer) {
+            await deleteFromR2(c, donation.proofOfTransfer);
         }
 
         await db.delete(donations).where(eq(donations.id, id));

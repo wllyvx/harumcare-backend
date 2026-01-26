@@ -1,5 +1,6 @@
 import { eq, desc, count, and } from 'drizzle-orm';
 import { blogs, users, campaigns } from '../db/schema.js';
+import { deleteFromR2 } from '../utils/r2.js';
 
 // Helper to map join result
 const mapBlogResult = (row) => {
@@ -210,6 +211,10 @@ export const updateBlog = async (c) => {
             .where(eq(blogs.id, blogId))
             .returning();
 
+        if (updatedBlog && image && existingBlog.image && image !== existingBlog.image) {
+            await deleteFromR2(c, existingBlog.image);
+        }
+
         return c.json(updatedBlog);
     } catch (error) {
         return c.json({ error: error.message }, 400);
@@ -232,6 +237,10 @@ export const deleteBlog = async (c) => {
         // Check if user is author or admin
         if (existingBlog.authorId !== user.userId && user.role !== 'admin') {
             return c.json({ error: 'Tidak memiliki izin untuk menghapus blog ini' }, 403);
+        }
+
+        if (existingBlog.image) {
+            await deleteFromR2(c, existingBlog.image);
         }
 
         await db.delete(blogs).where(eq(blogs.id, blogId));
