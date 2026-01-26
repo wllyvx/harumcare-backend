@@ -25,7 +25,7 @@ export const getAllBlogs = async (c) => {
         const limit = parseInt(c.req.query('limit') || '10');
         const category = c.req.query('category');
         const status = c.req.query('status');
-        const campaignId = parseInt(c.req.query('campaignId'));
+        const campaignId = c.req.query('campaignId');
 
         const offset = (page - 1) * limit;
 
@@ -38,7 +38,7 @@ export const getAllBlogs = async (c) => {
             filters.push(eq(blogs.status, 'published'));
         }
         if (category) filters.push(eq(blogs.category, category));
-        if (campaignId && !isNaN(campaignId)) filters.push(eq(blogs.campaignId, campaignId));
+        if (campaignId) filters.push(eq(blogs.campaignId, campaignId));
 
         const whereClause = filters.length > 0 ? and(...filters) : undefined;
 
@@ -156,7 +156,7 @@ export const createBlog = async (c) => {
             image,
             status,
             authorId: user.userId,
-            campaignId: campaignId ? parseInt(campaignId) : null
+            campaignId: campaignId || null
         }).returning();
 
         // Populate author details (simulated or minimal return)
@@ -179,8 +179,7 @@ export const createBlog = async (c) => {
 export const updateBlog = async (c) => {
     try {
         const db = c.get('db');
-        const blogId = parseInt(c.req.param('id'));
-        if (isNaN(blogId)) return c.json({ error: 'Invalid ID' }, 400);
+        const blogId = c.req.param('id');
 
         const body = await c.req.json();
         const { title, content, category, image, status, campaignId } = body;
@@ -203,7 +202,7 @@ export const updateBlog = async (c) => {
         if (category) updateData.category = category;
         if (image) updateData.image = image;
         if (status) updateData.status = status;
-        if (campaignId !== undefined) updateData.campaignId = campaignId ? parseInt(campaignId) : null;
+        if (campaignId !== undefined) updateData.campaignId = campaignId || null;
         updateData.updatedAt = new Date();
 
         const [updatedBlog] = await db.update(blogs)
@@ -221,8 +220,7 @@ export const updateBlog = async (c) => {
 export const deleteBlog = async (c) => {
     try {
         const db = c.get('db');
-        const blogId = parseInt(c.req.param('id'));
-        if (isNaN(blogId)) return c.json({ error: 'Invalid ID' }, 400);
+        const blogId = c.req.param('id');
 
         const [existingBlog] = await db.select().from(blogs).where(eq(blogs.id, blogId));
 
@@ -248,10 +246,10 @@ export const getLatestBlogs = async (c) => {
     try {
         const db = c.get('db');
         const limit = parseInt(c.req.query('limit') || '5');
-        const campaignId = parseInt(c.req.query('campaignId'));
+        const campaignId = c.req.query('campaignId');
 
         const filters = [eq(blogs.status, 'published')];
-        if (campaignId && !isNaN(campaignId)) filters.push(eq(blogs.campaignId, campaignId));
+        if (campaignId) filters.push(eq(blogs.campaignId, campaignId));
 
         const rows = await db.select({
             blogs: blogs,
@@ -281,8 +279,7 @@ export const getLatestBlogs = async (c) => {
 export const getBlogsByCampaign = async (c) => {
     try {
         const db = c.get('db');
-        const campaignId = parseInt(c.req.param('campaignId'));
-        if (isNaN(campaignId)) return c.json({ error: 'Invalid Campaign ID' }, 400);
+        const campaignId = c.req.param('campaignId');
 
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');

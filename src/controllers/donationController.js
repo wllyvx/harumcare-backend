@@ -74,10 +74,8 @@ export const createDonation = async (c) => {
             return c.json({ error: "Minimal donasi Rp 1.000" }, 400);
         }
 
-        const campIdInt = parseInt(campaignId);
-
         // Check if campaign exists and still active
-        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campIdInt));
+        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
 
         if (!campaign) {
             return c.json({ error: "Campaign tidak ditemukan" }, 404);
@@ -98,7 +96,7 @@ export const createDonation = async (c) => {
 
         // Create donation with pending status
         const [donation] = await db.insert(donations).values({
-            campaignId: campIdInt,
+            campaignId,
             userId,
             amount,
             message,
@@ -132,8 +130,7 @@ export const createDonation = async (c) => {
 export const updateDonationProof = async (c) => {
     try {
         const db = c.get('db');
-        const donationId = parseInt(c.req.param('donationId'));
-        if (isNaN(donationId)) return c.json({ error: 'Invalid Donation ID' }, 400);
+        const donationId = c.req.param('donationId');
 
         const { proofOfTransfer } = await c.req.json();
 
@@ -168,8 +165,7 @@ export const updateDonationProof = async (c) => {
 export const getDonationsByCampaign = async (c) => {
     try {
         const db = c.get('db');
-        const campaignId = parseInt(c.req.param('campaignId'));
-        if (isNaN(campaignId)) return c.json({ error: 'Invalid Campaign ID' }, 400);
+        const campaignId = c.req.param('campaignId');
 
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');
@@ -413,8 +409,7 @@ export const updateDonationStatus = async (c) => {
             return c.json({ message: "Access denied. Admin only." }, 403);
         }
 
-        const id = parseInt(c.req.param('id'));
-        if (isNaN(id)) return c.json({ message: "Invalid ID" }, 400);
+        const id = c.req.param('id');
 
         const { paymentStatus } = await c.req.json();
 
@@ -467,8 +462,7 @@ export const deleteDonation = async (c) => {
             return c.json({ error: 'Unauthorized access' }, 403);
         }
 
-        const id = parseInt(c.req.param('id'));
-        if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
+        const id = c.req.param('id');
 
         const [donation] = await db.select().from(donations).where(eq(donations.id, id));
         if (!donation) {
@@ -524,9 +518,7 @@ export const createDonationByAdmin = async (c) => {
             return c.json({ error: "Minimal donasi Rp 1.000" }, 400);
         }
 
-        const campIdInt = parseInt(campaignId);
-
-        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campIdInt));
+        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
         if (!campaign) {
             return c.json({ error: "Campaign tidak ditemukan" }, 404);
         }
@@ -538,7 +530,7 @@ export const createDonationByAdmin = async (c) => {
         const transactionId = `TRX-ADMIN-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
         const [donation] = await db.insert(donations).values({
-            campaignId: campIdInt,
+            campaignId,
             userId: user.userId,
             amount,
             message,
@@ -551,7 +543,7 @@ export const createDonationByAdmin = async (c) => {
         }).returning();
 
         if (paymentStatus === 'completed') {
-            await updateCampaignStats(db, campIdInt);
+            await updateCampaignStats(db, campaignId);
         }
 
         return c.json({

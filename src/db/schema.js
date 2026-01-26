@@ -2,7 +2,7 @@ import { sqliteTable, text, integer, uniqueIndex, primaryKey } from 'drizzle-orm
 import { sql } from 'drizzle-orm';
 
 export const users = sqliteTable('users', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
     nama: text('nama').notNull(),
     username: text('username').notNull().unique(),
     email: text('email').notNull().unique(),
@@ -15,7 +15,7 @@ export const users = sqliteTable('users', {
 });
 
 export const campaigns = sqliteTable('campaigns', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
     title: text('title').notNull(),
     description: text('description'),
     imageUrl: text('imageUrl'),
@@ -31,14 +31,14 @@ export const campaigns = sqliteTable('campaigns', {
 });
 
 export const news = sqliteTable('news', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
     title: text('title').notNull(),
     slug: text('slug').notNull().unique(),
     content: text('content').notNull(),
     image: text('image').default('images/empty-image-placeholder.webp'),
-    authorId: integer('author_id').references(() => users.id).notNull(),
+    authorId: text('author_id').references(() => users.id).notNull(),
     category: text('category').default('umum').notNull(),
-    campaignId: integer('campaign_id').references(() => campaigns.id),
+    campaignId: text('campaign_id').references(() => campaigns.id),
     status: text('status', { enum: ['draft', 'published'] }).default('draft'),
     viewCount: integer('viewCount').default(0),
     createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
@@ -46,14 +46,14 @@ export const news = sqliteTable('news', {
 });
 
 export const blogs = sqliteTable('blogs', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
     title: text('title').notNull(),
     slug: text('slug').notNull().unique(),
     content: text('content').notNull(),
     image: text('image').default('images/empty-image-placeholder.webp'),
-    authorId: integer('author_id').references(() => users.id).notNull(),
+    authorId: text('author_id').references(() => users.id).notNull(),
     category: text('category').default('umum').notNull(),
-    campaignId: integer('campaign_id').references(() => campaigns.id),
+    campaignId: text('campaign_id').references(() => campaigns.id),
     status: text('status', { enum: ['draft', 'published'] }).default('draft'),
     viewCount: integer('viewCount').default(0),
     createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
@@ -61,9 +61,9 @@ export const blogs = sqliteTable('blogs', {
 });
 
 export const donations = sqliteTable('donations', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    campaignId: integer('campaign_id').references(() => campaigns.id).notNull(),
-    userId: integer('user_id').references(() => users.id).notNull(),
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+    campaignId: text('campaign_id').references(() => campaigns.id).notNull(),
+    userId: text('user_id').references(() => users.id).notNull(),
     amount: integer('amount').notNull(), // Storing as integer (e.g. Rp 1000)
     message: text('message'),
     paymentStatus: text('paymentStatus', { enum: ['pending', 'completed', 'failed'] }).default('pending'),

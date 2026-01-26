@@ -54,8 +54,7 @@ export const getAllCampaigns = async (c) => {
 export const getCampaignById = async (c) => {
     try {
         const db = c.get('db');
-        const id = parseInt(c.req.param('id'));
-        if (isNaN(id)) return c.json({ error: 'Invalid ID' }, 400);
+        const id = c.req.param('id');
 
         const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, id));
         if (!campaign) {
@@ -138,8 +137,7 @@ export const createCampaign = async (c) => {
 export const updateCampaign = async (c) => {
     try {
         const db = c.get('db');
-        const campaignId = parseInt(c.req.param('id'));
-        if (isNaN(campaignId)) return c.json({ error: 'Invalid ID' }, 400);
+        const campaignId = c.req.param('id');
 
         const updateDataRaw = await c.req.json();
 
@@ -182,8 +180,7 @@ export const updateCampaign = async (c) => {
 export const deleteCampaign = async (c) => {
     try {
         const db = c.get('db');
-        const campaignId = parseInt(c.req.param('id'));
-        if (isNaN(campaignId)) return c.json({ error: 'Invalid ID' }, 400);
+        const campaignId = c.req.param('id');
 
         const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
 

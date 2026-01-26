@@ -25,13 +25,13 @@ export const getAllNews = async (c) => {
         const limit = parseInt(c.req.query('limit') || '10');
         const category = c.req.query('category');
         const status = c.req.query('status') || 'published'; // Default to published news
-        const campaignId = parseInt(c.req.query('campaignId'));
+        const campaignId = c.req.query('campaignId');
 
         const offset = (page - 1) * limit;
 
         const filters = [eq(news.status, status)];
         if (category) filters.push(eq(news.category, category));
-        if (campaignId && !isNaN(campaignId)) filters.push(eq(news.campaignId, campaignId));
+        if (campaignId) filters.push(eq(news.campaignId, campaignId));
 
         const whereClause = and(...filters);
 
@@ -149,7 +149,7 @@ export const createNews = async (c) => {
             image,
             status,
             authorId: user.userId,
-            campaignId: campaignId ? parseInt(campaignId) : null
+            campaignId: campaignId || null
         }).returning();
 
         // Populate author details (could fetch, but simpler valid response)
@@ -173,8 +173,7 @@ export const createNews = async (c) => {
 export const updateNews = async (c) => {
     try {
         const db = c.get('db');
-        const newsId = parseInt(c.req.param('id'));
-        if (isNaN(newsId)) return c.json({ error: 'Invalid ID' }, 400);
+        const newsId = c.req.param('id');
 
         const body = await c.req.json();
         const { title, content, category, image, status, campaignId } = body;
@@ -197,7 +196,7 @@ export const updateNews = async (c) => {
         if (category) updateData.category = category;
         if (image) updateData.image = image;
         if (status) updateData.status = status;
-        if (campaignId !== undefined) updateData.campaignId = campaignId ? parseInt(campaignId) : null;
+        if (campaignId !== undefined) updateData.campaignId = campaignId || null;
         updateData.updatedAt = new Date();
 
         const [updatedNews] = await db.update(news)
@@ -215,8 +214,7 @@ export const updateNews = async (c) => {
 export const deleteNews = async (c) => {
     try {
         const db = c.get('db');
-        const newsId = parseInt(c.req.param('id'));
-        if (isNaN(newsId)) return c.json({ error: 'Invalid ID' }, 400);
+        const newsId = c.req.param('id');
 
         const [existingNews] = await db.select().from(news).where(eq(news.id, newsId));
 
@@ -242,10 +240,10 @@ export const getLatestNews = async (c) => {
     try {
         const db = c.get('db');
         const limit = parseInt(c.req.query('limit') || '5');
-        const campaignId = parseInt(c.req.query('campaignId'));
+        const campaignId = c.req.query('campaignId');
 
         const filters = [eq(news.status, 'published')];
-        if (campaignId && !isNaN(campaignId)) filters.push(eq(news.campaignId, campaignId));
+        if (campaignId) filters.push(eq(news.campaignId, campaignId));
 
         const rows = await db.select({
             news: news,
@@ -275,8 +273,7 @@ export const getLatestNews = async (c) => {
 export const getNewsByCampaign = async (c) => {
     try {
         const db = c.get('db');
-        const campaignId = parseInt(c.req.param('campaignId'));
-        if (isNaN(campaignId)) return c.json({ error: 'Invalid Campaign ID' }, 400);
+        const campaignId = c.req.param('campaignId');
 
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');
