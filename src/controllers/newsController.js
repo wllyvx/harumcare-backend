@@ -157,8 +157,8 @@ export const createNews = async (c) => {
             category,
             image: image || 'images/empty-image-placeholder.webp',
             status,
-            authorId: user.userId,
-            campaignId: campaignId || null
+            authorId: String(user.userId),
+            campaignId: campaignId ? String(campaignId) : null
         }).returning();
 
         // Populate author details
