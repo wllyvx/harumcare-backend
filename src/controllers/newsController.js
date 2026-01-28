@@ -126,10 +126,18 @@ export const getNewsBySlug = async (c) => {
 
 // Create new news
 export const createNews = async (c) => {
+    let body = {};
     try {
         const db = c.get('db');
-        const body = await c.req.json();
+        body = await c.req.json();
         const { title, content, category, image, status, campaignId } = body;
+
+        // Validate required fields
+        if (!title || !content || !category || !status) {
+            return c.json({ 
+                error: 'Field required: title, content, category, status harus diisi' 
+            }, 400);
+        }
 
         // Generate slug from title
         const slug = title
@@ -147,13 +155,13 @@ export const createNews = async (c) => {
             slug,
             content,
             category,
-            image,
+            image: image || 'images/empty-image-placeholder.webp',
             status,
             authorId: user.userId,
             campaignId: campaignId || null
         }).returning();
 
-        // Populate author details (could fetch, but simpler valid response)
+        // Populate author details
         const responseData = {
             ...savedNews,
             author: {
@@ -167,7 +175,7 @@ export const createNews = async (c) => {
         console.error('Create news error details:', {
             message: error.message,
             stack: error.stack,
-            body: await c.req.json().catch(() => ({})),
+            body: body,
             user: c.get('user')
         });
         return c.json({ error: `Gagal membuat berita. Pesan error: ${error.message}` }, 400);

@@ -1,0 +1,4 @@
+-- Migration: Convert all ID columns from INTEGER to TEXT for UUID support
+-- This migration was applied manually via migrate_ids.sql
+-- All ID columns (blogs, campaigns, news, users, donations) and their foreign keys are now TEXT type
+-- This ensures proper UUID handling and resolves foreign key constraint issues
