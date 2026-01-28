@@ -158,15 +158,19 @@ export const createNews = async (c) => {
             ...savedNews,
             author: {
                 nama: user.nama,
-                username: user.role // or user.username doesn't matter much for create response sometimes, but better fetch if needed.
-                // For now, let's keep it minimal or consistent
+                username: user.username
             }
         };
 
         return c.json(responseData, 201);
     } catch (error) {
-        console.error('Create news error:', error);
-        return c.json({ error: error.message }, 400);
+        console.error('Create news error details:', {
+            message: error.message,
+            stack: error.stack,
+            body: await c.req.json().catch(() => ({})),
+            user: c.get('user')
+        });
+        return c.json({ error: `Gagal membuat berita. Pesan error: ${error.message}` }, 400);
     }
 };
 

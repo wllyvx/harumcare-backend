@@ -165,14 +165,19 @@ export const createBlog = async (c) => {
             ...savedBlog,
             author: {
                 nama: user.nama,
-                username: user.role
+                username: user.username
             }
         };
 
         return c.json(responseData, 201);
     } catch (error) {
-        console.error('Create blog error:', error);
-        return c.json({ error: error.message }, 400);
+        console.error('Create blog error details:', {
+            message: error.message,
+            stack: error.stack,
+            body: await c.req.json().catch(() => ({})),
+            user: c.get('user')
+        });
+        return c.json({ error: `Gagal membuat blog. Pesan error: ${error.message}` }, 400);
     }
 };
 
