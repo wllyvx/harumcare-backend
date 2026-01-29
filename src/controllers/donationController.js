@@ -102,7 +102,7 @@ export const createDonation = async (c) => {
             amount,
             message,
             paymentMethod,
-            donorName: isAnonymous ? "Hamba Allah" : userInfo.nama,
+            donorName: isAnonymous ? "Hamba Allah" : (donorName || userInfo.nama),
             isAnonymous: !!isAnonymous,
             paymentStatus: "pending",
             uniqueCode: uniqueCode || null,
