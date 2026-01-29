@@ -1,4 +1,4 @@
-import { eq, desc, count, and } from 'drizzle-orm';
+import { eq, desc, count, and, or, like } from 'drizzle-orm';
 import { news, users, campaigns } from '../db/schema.js';
 import { deleteFromR2 } from '../utils/r2.js';
 
@@ -27,12 +27,19 @@ export const getAllNews = async (c) => {
         const category = c.req.query('category');
         const status = c.req.query('status') || 'published'; // Default to published news
         const campaignId = c.req.query('campaignId');
+        const searchQuery = c.req.query('q');
 
         const offset = (page - 1) * limit;
 
         const filters = [eq(news.status, status)];
         if (category) filters.push(eq(news.category, category));
         if (campaignId) filters.push(eq(news.campaignId, campaignId));
+        if (searchQuery) {
+            filters.push(or(
+                like(news.title, `%${searchQuery}%`),
+                like(news.content, `%${searchQuery}%`)
+            ));
+        }
 
         const whereClause = and(...filters);
 
