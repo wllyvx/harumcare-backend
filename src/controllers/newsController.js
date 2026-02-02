@@ -137,12 +137,12 @@ export const createNews = async (c) => {
     try {
         const db = c.get('db');
         body = await c.req.json();
-        const { title, content, category, image, status, campaignId } = body;
+        const { title, content, category, image, status, campaignId, createdAt } = body;
 
         // Validate required fields
         if (!title || !content || !category || !status) {
-            return c.json({ 
-                error: 'Field required: title, content, category, status harus diisi' 
+            return c.json({
+                error: 'Field required: title, content, category, status harus diisi'
             }, 400);
         }
 
@@ -165,7 +165,8 @@ export const createNews = async (c) => {
             image: image || 'images/empty-image-placeholder.webp',
             status,
             authorId: String(user.userId),
-            campaignId: campaignId ? String(campaignId) : null
+            campaignId: campaignId ? String(campaignId) : null,
+            createdAt: createdAt ? new Date(createdAt) : undefined
         }).returning();
 
         // Populate author details
@@ -196,7 +197,7 @@ export const updateNews = async (c) => {
         const newsId = c.req.param('id');
 
         const body = await c.req.json();
-        const { title, content, category, image, status, campaignId } = body;
+        const { title, content, category, image, status, campaignId, createdAt } = body;
 
         const [existingNews] = await db.select().from(news).where(eq(news.id, newsId));
 
@@ -217,6 +218,7 @@ export const updateNews = async (c) => {
         if (image) updateData.image = image;
         if (status) updateData.status = status;
         if (campaignId !== undefined) updateData.campaignId = campaignId || null;
+        if (createdAt) updateData.createdAt = new Date(createdAt);
         updateData.updatedAt = new Date();
 
         const [updatedNews] = await db.update(news)

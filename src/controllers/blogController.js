@@ -144,12 +144,12 @@ export const createBlog = async (c) => {
     try {
         const db = c.get('db');
         body = await c.req.json();
-        const { title, content, category, image, status, campaignId } = body;
+        const { title, content, category, image, status, campaignId, createdAt } = body;
 
         // Validate required fields
         if (!title || !content || !category || !status) {
-            return c.json({ 
-                error: 'Field required: title, content, category, status harus diisi' 
+            return c.json({
+                error: 'Field required: title, content, category, status harus diisi'
             }, 400);
         }
 
@@ -172,7 +172,8 @@ export const createBlog = async (c) => {
             image: image || 'images/empty-image-placeholder.webp',
             status,
             authorId: String(user.userId),
-            campaignId: campaignId ? String(campaignId) : null
+            campaignId: campaignId ? String(campaignId) : null,
+            createdAt: createdAt ? new Date(createdAt) : undefined
         }).returning();
 
         // Populate author details
@@ -203,7 +204,7 @@ export const updateBlog = async (c) => {
         const blogId = c.req.param('id');
 
         const body = await c.req.json();
-        const { title, content, category, image, status, campaignId } = body;
+        const { title, content, category, image, status, campaignId, createdAt } = body;
 
         const [existingBlog] = await db.select().from(blogs).where(eq(blogs.id, blogId));
 
@@ -224,6 +225,7 @@ export const updateBlog = async (c) => {
         if (image) updateData.image = image;
         if (status) updateData.status = status;
         if (campaignId !== undefined) updateData.campaignId = campaignId || null;
+        if (createdAt) updateData.createdAt = new Date(createdAt);
         updateData.updatedAt = new Date();
 
         const [updatedBlog] = await db.update(blogs)
