@@ -63,7 +63,7 @@ export const createDonation = async (c) => {
         console.log('Create donation - Request body:', body);
         console.log('Create donation - User from token:', user);
 
-        const { campaignId, amount, message, paymentMethod, isAnonymous, uniqueCode } = body;
+        const { campaignId, amount, message, paymentMethod, donorName, isAnonymous, uniqueCode } = body;
         const userId = user.userId;
 
         // Validasi input
