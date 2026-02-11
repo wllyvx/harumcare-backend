@@ -22,6 +22,20 @@
       "when": 1769565869563,
       "tag": "0002_convert_ids_to_text",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1770784534897,
+      "tag": "0003_mighty_shadowcat",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1771310090000,
+      "tag": "0004_add_google_auth",
+      "breakpoints": true
     }
   ]
 }

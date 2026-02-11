@@ -6,10 +6,12 @@ export const users = sqliteTable('users', {
     nama: text('nama').notNull(),
     username: text('username').notNull().unique(),
     email: text('email').notNull().unique(),
-    password: text('password').notNull(),
+    password: text('password'), // nullable for Google Sign-In users
     nomorHp: text('nomorHp').notNull(),
     alamat: text('alamat'),
     role: text('role', { enum: ['admin', 'user'] }).default('user'),
+    googleId: text('google_id').unique(),
+    authProvider: text('auth_provider', { enum: ['local', 'google'] }).default('local'),
     createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
 });
