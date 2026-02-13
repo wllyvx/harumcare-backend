@@ -85,11 +85,16 @@ auth.post('/google', async (c) => {
 
         // Verify the Google ID token
         const googleUser = await verifyGoogleToken(credential, googleClientId);
+        console.log('Verified Google User:', { sub: googleUser.sub, email: googleUser.email });
 
-        // Check if user already exists by googleId or email
-        const [existingUser] = await db.select().from(users).where(
-            or(eq(users.googleId, googleUser.sub), eq(users.email, googleUser.email))
-        ).limit(1);
+        // Check if user already exists by googleId
+        let [existingUser] = await db.select().from(users).where(eq(users.googleId, googleUser.sub)).limit(1);
+
+        // If not found by googleId, check by email
+        if (!existingUser) {
+            const [userByEmail] = await db.select().from(users).where(eq(users.email, googleUser.email)).limit(1);
+            existingUser = userByEmail;
+        }
 
         let user;
 
