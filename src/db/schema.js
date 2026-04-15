@@ -77,3 +77,27 @@ export const donations = sqliteTable('donations', {
     createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
     completedAt: integer('completed_at', { mode: 'timestamp' }),
 });
+
+export const consultations = sqliteTable('consultations', {
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+    title: text('title').notNull(),
+    content: text('content').notNull(),
+    category: text('category').notNull(),
+    authorId: text('author_id').references(() => users.id),
+    authorName: text('author_name'),
+    authorEmail: text('author_email'),
+    isAnonymous: integer('is_anonymous', { mode: 'boolean' }).default(false),
+    status: text('status', { enum: ['pending', 'answered', 'closed'] }).default('pending'),
+    createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+});
+
+export const consultationReplies = sqliteTable('consultation_replies', {
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+    consultationId: text('consultation_id').references(() => consultations.id).notNull(),
+    content: text('content').notNull(),
+    authorId: text('author_id').references(() => users.id).notNull(),
+    isAdminReply: integer('is_admin_reply', { mode: 'boolean' }).default(false),
+    createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+});

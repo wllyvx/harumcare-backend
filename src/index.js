@@ -46,6 +46,7 @@ import donationRoutes from './routes/donations.js';
 import userRoutes from './routes/users.js';
 import newsRoutes from './routes/news.js';
 import blogRoutes from './routes/blog.js';
+import consultationRoutes from './routes/consultations.js';
 
 app.route('/api/auth', authRoutes);
 app.route('/api/upload', uploadRoutes);
@@ -54,5 +55,6 @@ app.route('/api/donations', donationRoutes);
 app.route('/api/users', userRoutes);
 app.route('/api/news', newsRoutes);
 app.route('/api/blog', blogRoutes);
+app.route('/api/consultations', consultationRoutes);
 
 export default app;
