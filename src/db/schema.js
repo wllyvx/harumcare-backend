@@ -62,6 +62,20 @@ export const blogs = sqliteTable('blogs', {
     updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
 });
 
+export const kajians = sqliteTable('kajians', {
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+    title: text('title').notNull(),
+    slug: text('slug').notNull().unique(),
+    description: text('description').notNull(),
+    youtubeLink: text('youtubeLink').notNull(),
+    authorId: text('author_id').references(() => users.id).notNull(),
+    category: text('category').default('umum').notNull(),
+    status: text('status', { enum: ['draft', 'published'] }).default('draft'),
+    viewCount: integer('viewCount').default(0),
+    createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`(strftime('%s', 'now'))`),
+});
+
 export const donations = sqliteTable('donations', {
     id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
     campaignId: text('campaign_id').references(() => campaigns.id).notNull(),

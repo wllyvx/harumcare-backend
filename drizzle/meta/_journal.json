@@ -43,6 +43,13 @@
       "when": 1776235794899,
       "tag": "0005_dusty_enchantress",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1776648219009,
+      "tag": "0006_fuzzy_miracleman",
+      "breakpoints": true
     }
   ]
 }

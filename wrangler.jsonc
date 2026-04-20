@@ -15,7 +15,8 @@
 	},
 	"vars": {
 		// "JWT_SECRET": "your_jwt_secret",
-		"GOOGLE_CLIENT_ID": "951723270938-c5bad61epvrs57qbgb5drau4btc0dke6.apps.googleusercontent.com"
+		"GOOGLE_CLIENT_ID": "951723270938-c5bad61epvrs57qbgb5drau4btc0dke6.apps.googleusercontent.com",
+		"YOUTUBE_API_KEY": "AIzaSyBJVm5HJsZmSx45PL6ElxWDg-HET8G34FY"
 	},
 	"r2_buckets": [
 		{
