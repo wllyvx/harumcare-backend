@@ -1,72 +1,13 @@
 import { Hono } from 'hono';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import { eq, or } from 'drizzle-orm';
 import { users } from '../db/schema.js';
 import { authenticateToken, restrictToAdmin } from '../middleware/auth.js';
+import { AuthService } from '../services/AuthService.js';
+import { GoogleAuthService } from '../services/GoogleAuthService.js';
 
 const auth = new Hono();
 
-// Helper: Verify Google ID Token
-async function verifyGoogleToken(credential, googleClientId) {
-    try {
-        // Decode the JWT header to get the key ID (kid)
-        const parts = credential.split('.');
-        if (parts.length !== 3) throw new Error('Invalid token format');
-
-        const header = JSON.parse(atob(parts[0].replace(/-/g, '+').replace(/_/g, '/')));
-        const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-
-        // Verify basic claims
-        if (payload.iss !== 'accounts.google.com' && payload.iss !== 'https://accounts.google.com') {
-            throw new Error('Invalid issuer');
-        }
-        if (payload.aud !== googleClientId) {
-            throw new Error('Invalid audience');
-        }
-        if (payload.exp < Math.floor(Date.now() / 1000)) {
-            throw new Error('Token expired');
-        }
-
-        // Fetch Google's public keys and verify signature
-        const certsResponse = await fetch('https://www.googleapis.com/oauth2/v3/certs');
-        const certs = await certsResponse.json();
-        const key = certs.keys.find(k => k.kid === header.kid);
-        if (!key) throw new Error('Key not found');
-
-        // Import the public key
-        const cryptoKey = await crypto.subtle.importKey(
-            'jwk',
-            key,
-            { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-            false,
-            ['verify']
-        );
-
-        // Verify the signature
-        const signatureBytes = Uint8Array.from(atob(parts[2].replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-        const dataBytes = new TextEncoder().encode(parts[0] + '.' + parts[1]);
-
-        const valid = await crypto.subtle.verify(
-            'RSASSA-PKCS1-v1_5',
-            cryptoKey,
-            signatureBytes,
-            dataBytes
-        );
-
-        if (!valid) throw new Error('Invalid signature');
-
-        return {
-            sub: payload.sub,       // Google user ID
-            email: payload.email,
-            name: payload.name || payload.email.split('@')[0],
-            picture: payload.picture
-        };
-    } catch (error) {
-        console.error('Google token verification error:', error);
-        throw new Error('Invalid Google token: ' + error.message);
-    }
-}
+// Google Sign-In helper moved to GoogleAuthService
 
 // Google Sign-In
 auth.post('/google', async (c) => {
@@ -84,7 +25,7 @@ auth.post('/google', async (c) => {
         }
 
         // Verify the Google ID token
-        const googleUser = await verifyGoogleToken(credential, googleClientId);
+        const googleUser = await GoogleAuthService.verifyToken(credential, googleClientId);
         console.log('Verified Google User:', { sub: googleUser.sub, email: googleUser.email });
 
         // Check if user already exists by googleId
@@ -132,10 +73,9 @@ auth.post('/google', async (c) => {
         }
 
         // Generate JWT
-        const token = jwt.sign(
+        const token = AuthService.generateToken(
             { userId: user.id, role: user.role, nama: user.nama },
-            c.env.JWT_SECRET || 'your_jwt_secret',
-            { expiresIn: '24h' }
+            c.env.JWT_SECRET
         );
 
         return c.json({
@@ -162,7 +102,7 @@ auth.post('/register-admin', authenticateToken, restrictToAdmin, async (c) => {
             return c.json({ error: 'Nama, username, email, password, dan nomor HP wajib diisi' }, 400);
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await AuthService.hashPassword(password);
 
         try {
             const [newUser] = await db.insert(users).values({
@@ -204,7 +144,7 @@ auth.post('/register', async (c) => {
             return c.json({ error: 'Format email tidak valid' }, 400);
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await AuthService.hashPassword(password);
 
         try {
             const [newUser] = await db.insert(users).values({
@@ -248,15 +188,14 @@ auth.post('/login', async (c) => {
             return c.json({ error: 'Username/email atau password salah' }, 401);
         }
 
-        const isMatch = await bcrypt.compare(password, user.password);
+        const isMatch = await AuthService.comparePassword(password, user.password);
         if (!isMatch) {
             return c.json({ error: 'Username/email atau password salah' }, 401);
         }
 
-        const token = jwt.sign(
+        const token = AuthService.generateToken(
             { userId: user.id, role: user.role, nama: user.nama },
-            c.env.JWT_SECRET || 'your_jwt_secret',
-            { expiresIn: '24h' }
+            c.env.JWT_SECRET
         );
 
         return c.json({

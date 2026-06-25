@@ -14,7 +14,7 @@
 		"enabled": true
 	},
 	"vars": {
-		// "JWT_SECRET": "your_jwt_secret",
+		"JWT_SECRET": "GCFwWVGVxtM7Lwl46r4uvmyrvF0UjCfmepCAF1d3S0M",
 		"GOOGLE_CLIENT_ID": "951723270938-c5bad61epvrs57qbgb5drau4btc0dke6.apps.googleusercontent.com",
 		"YOUTUBE_API_KEY": "AIzaSyBJVm5HJsZmSx45PL6ElxWDg-HET8G34FY"
 	},
