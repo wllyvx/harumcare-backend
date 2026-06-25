@@ -1,22 +1,7 @@
 import { eq, desc, count, and, or, like } from 'drizzle-orm';
 import { news, users, campaigns } from '../db/schema.js';
 import { deleteFromR2 } from '../utils/r2.js';
-
-// Helper to map join result
-const mapNewsResult = (row) => {
-    if (!row) return null;
-    return {
-        ...row.news,
-        author: row.users ? {
-            nama: row.users.nama,
-            username: row.users.username
-        } : null,
-        campaignId: row.campaigns ? {
-            title: row.campaigns.title,
-            imageUrl: row.campaigns.imageUrl
-        } : null
-    };
-};
+import { authorCampaignSelect, authorSelect, mapJoinedRow } from '../utils/dbHelpers.js';
 
 // Get all news with pagination and filters
 export const getAllNews = async (c) => {
@@ -53,14 +38,7 @@ export const getAllNews = async (c) => {
 
         const rows = await db.select({
             news: news,
-            users: {
-                nama: users.nama,
-                username: users.username
-            },
-            campaigns: {
-                title: campaigns.title,
-                imageUrl: campaigns.imageUrl
-            }
+            ...authorCampaignSelect(users, campaigns)
         })
             .from(news)
             .leftJoin(users, eq(news.authorId, users.id))
@@ -71,7 +49,7 @@ export const getAllNews = async (c) => {
             .offset(offset);
 
         return c.json({
-            news: rows.map(mapNewsResult),
+            news: rows.map(r => mapJoinedRow(r, 'news')),
             currentPage: page,
             totalPages,
             totalNews
@@ -89,10 +67,7 @@ export const getNewsBySlug = async (c) => {
 
         const [row] = await db.select({
             news: news,
-            users: {
-                nama: users.nama,
-                username: users.username
-            }
+            ...authorSelect(users)
         })
             .from(news)
             .leftJoin(users, eq(news.authorId, users.id))
@@ -102,6 +77,7 @@ export const getNewsBySlug = async (c) => {
         if (!row) {
             return c.json({ error: 'Berita tidak ditemukan' }, 404);
         }
+
 
         const newsData = row.news;
 
@@ -116,16 +92,8 @@ export const getNewsBySlug = async (c) => {
             relatedCampaign = camp || null;
         }
 
-        const newsWithCampaign = {
-            ...newsData,
-            author: row.users ? {
-                nama: row.users.nama,
-                username: row.users.username
-            } : null,
-            relatedCampaign
-        };
-
-        return c.json(newsWithCampaign);
+        const mapped = mapJoinedRow(row, 'news');
+        return c.json({ ...mapped, relatedCampaign });
     } catch (error) {
         return c.json({ error: error.message }, 500);
     }
@@ -277,14 +245,7 @@ export const getLatestNews = async (c) => {
 
         const rows = await db.select({
             news: news,
-            users: {
-                nama: users.nama,
-                username: users.username
-            },
-            campaigns: {
-                title: campaigns.title,
-                imageUrl: campaigns.imageUrl
-            }
+            ...authorCampaignSelect(users, campaigns)
         })
             .from(news)
             .leftJoin(users, eq(news.authorId, users.id))
@@ -293,7 +254,7 @@ export const getLatestNews = async (c) => {
             .orderBy(desc(news.createdAt))
             .limit(limit);
 
-        return c.json(rows.map(mapNewsResult));
+        return c.json(rows.map(r => mapJoinedRow(r, 'news')));
     } catch (error) {
         return c.json({ error: error.message }, 500);
     }
@@ -321,14 +282,7 @@ export const getNewsByCampaign = async (c) => {
 
         const rows = await db.select({
             news: news,
-            users: {
-                nama: users.nama,
-                username: users.username
-            },
-            campaigns: {
-                title: campaigns.title,
-                imageUrl: campaigns.imageUrl
-            }
+            ...authorCampaignSelect(users, campaigns)
         })
             .from(news)
             .leftJoin(users, eq(news.authorId, users.id))
@@ -339,7 +293,7 @@ export const getNewsByCampaign = async (c) => {
             .offset(offset);
 
         return c.json({
-            news: rows.map(mapNewsResult),
+            news: rows.map(r => mapJoinedRow(r, 'news')),
             currentPage: page,
             totalPages,
             totalNews
