@@ -6,10 +6,13 @@
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
-		"start": "wrangler dev"
+		"start": "wrangler dev",
+		"test": "vitest run",
+		"test:watch": "vitest"
 	},
 	"devDependencies": {
 		"drizzle-kit": "^0.31.8",
+		"vitest": "^5.0.0",
 		"wrangler": "^4.59.3"
 	},
 	"dependencies": {
