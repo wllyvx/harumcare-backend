@@ -10,6 +10,40 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
 
   const isMemoryDb = !!db.__isFakeDb && !!db.__tables;
 
+  // Single whitelist for stored statuses. `all` is a list-filter-only alias
+  // (never persisted); validated separately in resolveStatusFilter.
+  const VALID_STATUSES = ['draft', 'published'];
+  const VALID_LIST_STATUSES = [...VALID_STATUSES, 'all'];
+
+  // Strict ISO-8601 (explicit): YYYY-MM-DD with optional T-time + timezone.
+  // Loose `new Date()` strings ('May 1, 2020', '2020/05/01', epoch numbers)
+  // are rejected even when parseable — admin backfill must be explicit.
+  const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}(?:[Tt]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?$/;
+
+  function parseStrictIsoCreatedAt(raw) {
+    if (raw instanceof Date) {
+      if (Number.isNaN(raw.getTime())) throw new ValidationError('Invalid createdAt: must be ISO-8601');
+      return new Date(raw.getTime());
+    }
+    if (typeof raw !== 'string' || !ISO_8601_RE.test(raw.trim())) {
+      throw new ValidationError('Invalid createdAt: must be ISO-8601');
+    }
+    const text = raw.trim();
+    // Reject impossible calendar days that `new Date` silently rolls over
+    // (e.g. 2020-02-30 → 2020-03-01). Time overflows already yield Invalid Date.
+    const m = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    if (month < 1 || month > 12) throw new ValidationError('Invalid createdAt: must be ISO-8601');
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    const dim = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+    if (day < 1 || day > dim) throw new ValidationError('Invalid createdAt: must be ISO-8601');
+    const d = new Date(text);
+    if (Number.isNaN(d.getTime())) throw new ValidationError('Invalid createdAt: must be ISO-8601');
+    return d;
+  }
+
   function normalizeListArgs(typeOrQuery, queryOrUser, maybeUser) {
     let type;
     let query;
@@ -29,9 +63,13 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
 
   function resolveStatusFilter(statusParam, user) {
     const isAdmin = user?.role === 'admin';
+    // Anon/non-admin always falls back to published (documented): any
+    // ?status value (including invalid) is ignored, never 400.
     if (!isAdmin) return 'published';
     if (statusParam === undefined || statusParam === null || statusParam === '') return 'published';
-    if (statusParam === 'all') return 'all';
+    if (!VALID_LIST_STATUSES.includes(statusParam)) {
+      throw new ValidationError('Invalid status: must be draft, published, or all');
+    }
     return statusParam;
   }
 
@@ -319,6 +357,9 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     }
     requireNonEmpty(dto, 'category', 'Category');
     requireNonEmpty(dto, 'status', 'Status');
+    if (!VALID_STATUSES.includes(dto.status)) {
+      throw new ValidationError('Invalid status: must be draft or published');
+    }
   }
 
   function normalizeCreateCampaignId(adapter, dto) {
@@ -329,15 +370,13 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
   }
 
   // Server-owned timestamps: body createdAt is ignored unless the caller is
-  // admin with a valid ISO date (import/backfill case); an admin-supplied
-  // invalid value is Validation 400. updatedAt is always server-owned.
+  // admin with a strict ISO-8601 value (import/backfill case); an
+  // admin-supplied non-ISO value is Validation 400. updatedAt is always server-owned.
   function resolveCreateCreatedAt(dto, user) {
     const raw = dto.createdAt;
     if (raw === undefined || raw === null || raw === '') return new Date();
     if (user?.role === 'admin') {
-      const d = new Date(raw);
-      if (Number.isNaN(d.getTime())) throw new ValidationError('Invalid createdAt: must be a valid date');
-      return d;
+      return parseStrictIsoCreatedAt(raw);
     }
     return new Date();
   }
@@ -499,8 +538,6 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     }
     throw new ConflictError('Could not generate a unique slug');
   }
-
-  const VALID_UPDATE_STATUSES = ['draft', 'published'];
 
   function extractVideoId(url) {
     if (typeof url !== 'string') return null;
@@ -700,7 +737,7 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
       }
     }
     if (dto.status !== undefined) {
-      if (!VALID_UPDATE_STATUSES.includes(dto.status)) {
+      if (!VALID_STATUSES.includes(dto.status)) {
         throw new ValidationError('Invalid status: must be draft or published');
       }
     }
@@ -737,12 +774,10 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     }
     if (dto.category !== undefined) values.category = dto.category;
     if (dto.status !== undefined) values.status = dto.status;
-    // createdAt stays server-owned: only admin with valid ISO may backfill.
+    // createdAt stays server-owned: only admin with strict ISO-8601 may backfill.
     if (dto.createdAt !== undefined && dto.createdAt !== null && dto.createdAt !== '') {
       if (user?.role === 'admin') {
-        const d = new Date(dto.createdAt);
-        if (Number.isNaN(d.getTime())) throw new ValidationError('Invalid createdAt: must be a valid date');
-        values.createdAt = d;
+        values.createdAt = parseStrictIsoCreatedAt(dto.createdAt);
       }
     }
     // updatedAt always server-owned; client value ignored.
