@@ -70,6 +70,16 @@ export function getAdapter(type) {
   return adapter;
 }
 
+// Map a unified detail item to the legacy detail shape per ContentType.
+// Seam items carry `campaign` (CampaignRef|null) with `campaignId` FK intact.
+// Legacy news/blog detail exposes the same ref under `relatedCampaign`
+// (single-join result, no extra select); kajian detail has no relatedCampaign key.
+export function toLegacyDetailEnvelope(type, item) {
+  const adapter = getAdapter(type);
+  if (!adapter.withCampaign) return { ...item };
+  return { ...item, relatedCampaign: item.campaign ?? null };
+}
+
 // Map generic {items,total,page,totalPages} to legacy envelope keys
 // (news/totalNews, blogs/totalBlogs, kajians/totalKajians + currentPage)
 // while preserving the generic keys for future clients.

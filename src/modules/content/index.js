@@ -162,8 +162,92 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     return drizzleList(adapter, query, user, page, limit);
   }
 
-  async function getBySlug(slug) {
-    throw new Error('not implemented: getBySlug');
+  function normalizeDetailArgs(typeOrSlug, slugOrUndefined) {
+    let type;
+    let slug;
+    if (typeof typeOrSlug === 'object' && typeOrSlug !== null) {
+      type = typeOrSlug.type;
+      slug = typeOrSlug.slug;
+    } else if (slugOrUndefined !== undefined) {
+      type = typeOrSlug;
+      slug = slugOrUndefined;
+    } else {
+      slug = typeOrSlug;
+      type = undefined;
+    }
+    if (!type || typeof slug !== 'string' || slug === '') {
+      throw new ValidationError('ContentType and Slug required');
+    }
+    return { type, slug };
+  }
+
+  function memoryGetBySlug(adapter, slug) {
+    const rows = db.__tables[adapter.tableName] || [];
+    const row = rows.find((r) => r.slug === slug);
+    if (!row) throw new NotFoundError(`${adapter.type} not found`);
+    // Atomic in-memory bump: find + increment run synchronously with no
+    // await in between, so concurrent getBySlug calls cannot lose hits.
+    row.viewCount = (row.viewCount || 0) + 1;
+
+    const tables = db.__tables;
+    const u = (tables.users || []).find((x) => String(x.id) === String(row.authorId)) || null;
+    const camp =
+      adapter.withCampaign && row.campaignId
+        ? (tables.campaigns || []).find((x) => String(x.id) === String(row.campaignId)) || null
+        : null;
+    return adapter.mapRow({
+      [adapter.alias]: row,
+      users: u ? { nama: u.nama, username: u.username } : null,
+      campaigns: camp ? { title: camp.title, imageUrl: camp.imageUrl } : null,
+    });
+  }
+
+  async function drizzleGetBySlug(adapter, slug) {
+    const table = adapter.table;
+    // Atomic ViewCount bump: single UPDATE with sql increment, no read-modify-write.
+    const updated = await db
+      .update(table)
+      .set({ viewCount: sql`${table.viewCount} + 1` })
+      .where(eq(table.slug, slug))
+      .returning({ id: table.id });
+    if (!updated || updated.length === 0) throw new NotFoundError(`${adapter.type} not found`);
+
+    // Single joined select for Author + CampaignRef (no extra campaign select).
+    // Kajian skips the Campaign join entirely.
+    let rows;
+    if (adapter.withCampaign) {
+      rows = await db
+        .select({
+          [adapter.alias]: table,
+          users: { nama: usersTable.nama, username: usersTable.username },
+          campaigns: { title: campaignsTable.title, imageUrl: campaignsTable.imageUrl },
+        })
+        .from(table)
+        .leftJoin(usersTable, eq(table.authorId, usersTable.id))
+        .leftJoin(campaignsTable, eq(table.campaignId, campaignsTable.id))
+        .where(eq(table.slug, slug))
+        .limit(1);
+    } else {
+      rows = await db
+        .select({
+          [adapter.alias]: table,
+          users: { nama: usersTable.nama, username: usersTable.username },
+        })
+        .from(table)
+        .leftJoin(usersTable, eq(table.authorId, usersTable.id))
+        .where(eq(table.slug, slug))
+        .limit(1);
+    }
+    const row = rows[0];
+    if (!row) throw new NotFoundError(`${adapter.type} not found`);
+    return adapter.mapRow(row);
+  }
+
+  async function getBySlug(typeOrSlug, slugOrUndefined) {
+    const { type, slug } = normalizeDetailArgs(typeOrSlug, slugOrUndefined);
+    const adapter = getAdapter(type);
+    if (isMemoryDb) return memoryGetBySlug(adapter, slug);
+    return drizzleGetBySlug(adapter, slug);
   }
 
   async function create(dto, user) {
@@ -201,7 +285,10 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     getAdapter(type);
     return {
       list: (query, user) => list(type, query, user),
-      getBySlug: (...args) => getBySlug(...args),
+      getBySlug: (slugOrObj) =>
+        slugOrObj && typeof slugOrObj === 'object'
+          ? getBySlug({ ...slugOrObj, type })
+          : getBySlug(type, slugOrObj),
       create: (...args) => create(...args),
       update: (...args) => update(...args),
       remove: (...args) => remove(...args),
