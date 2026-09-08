@@ -1,6 +1,8 @@
 import { eq, desc, and, sql, sum, count } from 'drizzle-orm';
 import { donations, campaigns, users } from '../db/schema.js';
-import { deleteFromR2 } from '../utils/r2.js';
+import { removeMediaBestEffort } from '../modules/media/index.js';
+
+const removeMedia = (c, url) => removeMediaBestEffort(c.env?.BUCKET, url);
 
 // Helper to update campaign stats (currentAmount and donorCount)
 const updateCampaignStats = async (db, campaignId) => {
@@ -156,7 +158,7 @@ export const updateDonationProof = async (c) => {
             .returning();
 
         if (updatedDonation && donation.proofOfTransfer && proofOfTransfer !== donation.proofOfTransfer) {
-            await deleteFromR2(c, donation.proofOfTransfer);
+            await removeMedia(c, donation.proofOfTransfer);
         }
 
         return c.json({ message: "Bukti transfer berhasil diunggah", donation: updatedDonation });
@@ -475,7 +477,7 @@ export const deleteDonation = async (c) => {
         }
 
         if (donation.proofOfTransfer) {
-            await deleteFromR2(c, donation.proofOfTransfer);
+            await removeMedia(c, donation.proofOfTransfer);
         }
 
         await db.delete(donations).where(eq(donations.id, id));

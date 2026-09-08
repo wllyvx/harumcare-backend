@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
 import { authenticateToken } from '../middleware/auth.js';
+import { createMedia } from '../modules/media/index.js';
 
 const upload = new Hono();
 
-// Upload Image to R2
+// Upload Image to R2 via the media seam (owns sanitize + key generation).
+// The seam takes only the bucket binding — no Hono context leaks into it.
 upload.post('/', authenticateToken, async (c) => {
     try {
         const body = await c.req.parseBody();
@@ -17,21 +19,22 @@ upload.post('/', authenticateToken, async (c) => {
             return c.json({ error: 'Server misconfiguration: R2 BUCKET not bound' }, 500);
         }
 
-        // Generate unique filename
-        const filename = Date.now() + '-' + Math.round(Math.random() * 1E9) + '-' + (file.name || 'image.jpg');
-
-        // Upload to R2
-        // Hono's parseBody returns a File object (Blob) which can be passed directly to put
-        await c.env.BUCKET.put(filename, file);
+        const media = createMedia({ bucket: c.env.BUCKET });
+        let key;
+        try {
+            key = await media.store(file, file.name || 'image.jpg', { contentType: file.type });
+        } catch (e) {
+            return c.json({ error: e.message || 'Gagal mengupload file' }, e.statusCode || 500);
+        }
 
         const baseUrl = c.req.url.split('/api/upload')[0]; // simple dynamic base url
-        const imageUrl = `${baseUrl}/api/upload/image/${filename}`;
+        const imageUrl = media.urlFor(key, baseUrl);
 
         return c.json({
             message: 'File berhasil diupload ke R2',
             imageUrl: imageUrl,
-            fileId: filename, // Use filename as ID for R2
-            filename: filename
+            fileId: key, // Use sanitized key as ID for R2
+            filename: key
         });
 
     } catch (error) {

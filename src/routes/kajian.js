@@ -1,19 +1,10 @@
-import { Hono } from 'hono';
-import * as kajianController from '../controllers/kajianController.js';
-import { authenticateToken } from '../middleware/auth.js';
+import { createContentRouter } from '../modules/content/routes.js';
 
-const kajian = new Hono();
-
-// Public routes
-kajian.get('/', kajianController.getAllKajians);
-kajian.get('/latest', kajianController.getLatestKajians);
-kajian.get('/categories', kajianController.getKajianCategories);
-kajian.get('/fetch-youtube', kajianController.fetchYouTubeData);
-kajian.get('/:slug', kajianController.getKajianBySlug);
-
-// Protected routes (require authentication)
-kajian.post('/', authenticateToken, kajianController.createKajian);
-kajian.put('/:id', authenticateToken, kajianController.updateKajian);
-kajian.delete('/:id', authenticateToken, kajianController.deleteKajian);
+// Thin adapter: mounts unchanged (/api/kajian), all handlers delegate via
+// `content.for('kajian')` with the injected youtubeFetcher. Auth guard lives
+// inside the shared router for POST / PUT /:id DELETE /:id. Legacy envelope
+// (kajians/totalKajians + currentPage, no relatedCampaign) preserved for
+// frontend compat. /fetch-youtube precedes /:slug.
+const kajian = createContentRouter('kajian');
 
 export default kajian;
