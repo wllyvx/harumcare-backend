@@ -162,15 +162,24 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     return drizzleList(adapter, query, user, page, limit);
   }
 
-  function normalizeDetailArgs(typeOrSlug, slugOrUndefined) {
+  function normalizeDetailArgs(typeOrSlug, slugOrUser) {
+    const maybeUser = arguments.length >= 3 ? arguments[2] : undefined;
     let type;
     let slug;
+    let user = null;
     if (typeof typeOrSlug === 'object' && typeOrSlug !== null) {
       type = typeOrSlug.type;
       slug = typeOrSlug.slug;
-    } else if (slugOrUndefined !== undefined) {
+      user = maybeUser ?? typeOrSlug.user ?? null;
+    } else if (slugOrUser !== undefined) {
       type = typeOrSlug;
-      slug = slugOrUndefined;
+      if (typeof slugOrUser === 'object' && slugOrUser !== null && 'slug' in slugOrUser) {
+        slug = slugOrUser.slug;
+        user = maybeUser ?? slugOrUser.user ?? null;
+      } else {
+        slug = slugOrUser;
+        user = maybeUser ?? null;
+      }
     } else {
       slug = typeOrSlug;
       type = undefined;
@@ -178,13 +187,22 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     if (!type || typeof slug !== 'string' || slug === '') {
       throw new ValidationError('ContentType and Slug required');
     }
-    return { type, slug };
+    return { type, slug, user };
   }
 
-  function memoryGetBySlug(adapter, slug) {
+  function isAdminUser(user) {
+    return user?.role === 'admin';
+  }
+
+  function memoryGetBySlug(adapter, slug, user) {
     const rows = db.__tables[adapter.tableName] || [];
     const row = rows.find((r) => r.slug === slug);
     if (!row) throw new NotFoundError(`${adapter.type} not found`);
+    // Authz: drafts are admin-only. Anon/non-admin sees 404 with no
+    // ViewCount bump (existence not leaked, counts not inflated).
+    if (row.status !== 'published' && !isAdminUser(user)) {
+      throw new NotFoundError(`${adapter.type} not found`);
+    }
     // Atomic in-memory bump: find + increment run synchronously with no
     // await in between, so concurrent getBySlug calls cannot lose hits.
     row.viewCount = (row.viewCount || 0) + 1;
@@ -202,13 +220,19 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     });
   }
 
-  async function drizzleGetBySlug(adapter, slug) {
+  async function drizzleGetBySlug(adapter, slug, user) {
     const table = adapter.table;
+    const isAdmin = isAdminUser(user);
+    // Authz-guarded atomic bump: anon/non-admin only bumps published rows,
+    // so a draft slug yields 0 updated rows → 404 with no ViewCount change.
+    const bumpWhere = isAdmin
+      ? eq(table.slug, slug)
+      : and(eq(table.slug, slug), eq(table.status, 'published'));
     // Atomic ViewCount bump: single UPDATE with sql increment, no read-modify-write.
     const updated = await db
       .update(table)
       .set({ viewCount: sql`${table.viewCount} + 1` })
-      .where(eq(table.slug, slug))
+      .where(bumpWhere)
       .returning({ id: table.id });
     if (!updated || updated.length === 0) throw new NotFoundError(`${adapter.type} not found`);
 
@@ -243,11 +267,12 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     return adapter.mapRow(row);
   }
 
-  async function getBySlug(typeOrSlug, slugOrUndefined) {
-    const { type, slug } = normalizeDetailArgs(typeOrSlug, slugOrUndefined);
+  async function getBySlug(typeOrSlug, slugOrUser) {
+    const maybeUser = arguments.length >= 3 ? arguments[2] : undefined;
+    const { type, slug, user } = normalizeDetailArgs(typeOrSlug, slugOrUser, maybeUser);
     const adapter = getAdapter(type);
-    if (isMemoryDb) return memoryGetBySlug(adapter, slug);
-    return drizzleGetBySlug(adapter, slug);
+    if (isMemoryDb) return memoryGetBySlug(adapter, slug, user);
+    return drizzleGetBySlug(adapter, slug, user);
   }
 
   function normalizeCreateArgs(typeOrDto, dtoOrUser, maybeUser) {
@@ -878,10 +903,10 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     getAdapter(type);
     return {
       list: (query, user) => list(type, query, user),
-      getBySlug: (slugOrObj) =>
+      getBySlug: (slugOrObj, user) =>
         slugOrObj && typeof slugOrObj === 'object'
-          ? getBySlug({ ...slugOrObj, type })
-          : getBySlug(type, slugOrObj),
+          ? getBySlug({ ...slugOrObj, type, user: user ?? slugOrObj.user ?? null })
+          : getBySlug(type, slugOrObj, user ?? null),
       create: (dto, user) =>
         dto && typeof dto === 'object' ? create({ ...dto, type }, user) : create(type, dto, user),
       update: (rowId, payload, caller) => update(type, rowId, payload, caller),

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { getAdapter, toLegacyDetailEnvelope, toLegacyListEnvelope } from './adapters.js';
 import { contentForRequest, handleContentError } from '../../controllers/contentController.js';
-import { authenticateToken } from '../../middleware/auth.js';
+import { authenticateToken, authenticateOptional } from '../../middleware/auth.js';
 
 const DELETE_MESSAGES = {
   news: 'Berita berhasil dihapus',
@@ -20,6 +20,12 @@ export function createContentRouter(type, opts = {}) {
   const deleteMessage = opts.deleteMessage || DELETE_MESSAGES[adapter.type] || 'Berhasil dihapus';
 
   const userOf = (c) => c.get('user') ?? null;
+
+  // Optional admin token for public reads: anon stays 200 published-only,
+  // admin token unlocks ?status=all/draft on GET / and draft detail on GET /:slug.
+  // /latest and /campaign/:campaignId hardcode status=published below, so they
+  // stay published-only even for admin.
+  router.use('*', authenticateOptional);
 
   // GET / — paginated list with filters (page/limit/category/status/campaignId/q)
   router.get('/', async (c) => {
@@ -99,10 +105,11 @@ export function createContentRouter(type, opts = {}) {
   }
 
   // GET /:slug — detail with atomic ViewCount + Author/CampaignRef
+  // Draft slugs 404 for anon (no ViewCount bump); admin token → 200.
   router.get('/:slug', async (c) => {
     try {
       const content = contentForRequest(c, adapter.type);
-      const item = await content.getBySlug(c.req.param('slug'));
+      const item = await content.getBySlug(c.req.param('slug'), userOf(c));
       return c.json(toLegacyDetailEnvelope(adapter.type, item));
     } catch (e) {
       return handleContentError(c, e);
