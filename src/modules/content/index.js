@@ -286,6 +286,9 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     if (adapter.type === 'kajian') {
       requireNonEmpty(dto, 'description', 'Description');
       requireNonEmpty(dto, 'youtubeLink', 'YoutubeLink');
+      if (!extractVideoId(dto.youtubeLink)) {
+        throw new ValidationError('Invalid youtubeLink');
+      }
     } else {
       requireNonEmpty(dto, 'content', 'Content');
     }
@@ -432,14 +435,22 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     const { type, dto, user } = normalizeCreateArgs(typeOrDto, dtoOrUser, maybeUser);
     const adapter = getAdapter(type);
     const authorId = resolveCreateAuthorId(user);
-    validateCreateDto(adapter, dto);
-    const campaignId = normalizeCreateCampaignId(adapter, dto);
+    let effectiveDto = dto;
+    if (adapter.withYouTube) {
+      // Early youtubeLink format gate so invalid links 400 without fetch.
+      if (typeof dto.youtubeLink === 'string' && dto.youtubeLink.trim() !== '' && !extractVideoId(dto.youtubeLink)) {
+        throw new ValidationError('Invalid youtubeLink');
+      }
+      effectiveDto = await autofillKajianCreateFields(adapter, dto);
+    }
+    validateCreateDto(adapter, effectiveDto);
+    const campaignId = normalizeCreateCampaignId(adapter, effectiveDto);
     if (campaignId && !(await campaignExists(campaignId))) {
       throw new ValidationError('Campaign not found');
     }
-    const createdAt = resolveCreateCreatedAt(dto, user);
+    const createdAt = resolveCreateCreatedAt(effectiveDto, user);
 
-    const base = slugify(dto.title);
+    const base = slugify(effectiveDto.title);
     if (!base) throw new ValidationError('Title must produce a valid slug');
 
     // Slug uniqueness loop: base, base-2, base-3 … up to 100 attempts, so a
@@ -448,7 +459,7 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     for (let attempt = 1; attempt <= 100; attempt++) {
       const slug = attempt === 1 ? base : `${base}-${attempt}`;
       if (await slugExists(adapter, slug)) continue;
-      const values = buildCreateValues(adapter, dto, { authorId, campaignId, slug, createdAt });
+      const values = buildCreateValues(adapter, effectiveDto, { authorId, campaignId, slug, createdAt });
       try {
         const item =
           isMemoryDb
@@ -478,6 +489,95 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
       if (match) return match[1];
     }
     return null;
+  }
+
+  function isMissingText(v) {
+    return typeof v !== 'string' || v.trim() === '';
+  }
+
+  // Kajian-only YouTube autofill for create: when title or description is
+  // missing, call the injected youtubeFetcher(videoId) and populate the
+  // missing fields. Fetcher throw warns and leaves dto untouched so the
+  // caller must supply manual title/description (Validation 400 downstream).
+  // Never called for news/blog (gated by adapter.withYouTube).
+  async function autofillKajianCreateFields(adapter, dto) {
+    if (!adapter.withYouTube) return dto;
+    if (typeof dto.youtubeLink !== 'string' || dto.youtubeLink.trim() === '') return dto;
+    const videoId = extractVideoId(dto.youtubeLink);
+    if (!videoId) return dto;
+    if (!isMissingText(dto.title) && !isMissingText(dto.description)) return dto;
+    if (typeof youtubeFetcher !== 'function') return dto;
+    try {
+      const info = await youtubeFetcher(videoId);
+      const filled = { ...dto };
+      if (isMissingText(filled.title) && info && typeof info.title === 'string' && info.title.trim() !== '') {
+        filled.title = info.title;
+      }
+      if (isMissingText(filled.description) && info && typeof info.description === 'string' && info.description.trim() !== '') {
+        filled.description = info.description;
+      }
+      return filled;
+    } catch (e) {
+      console.warn(`YouTube fetch failed for ${videoId}: ${e?.message || e}`);
+      return dto;
+    }
+  }
+
+  // Kajian-only YouTube autofill for update: when youtubeLink changes and
+  // title/description are not explicitly supplied, refresh them from the
+  // new video. Fetcher throw warns and keeps the existing values.
+  async function maybeAutofillKajianUpdate(adapter, dto, existing) {
+    if (!adapter.withYouTube) return dto;
+    if (dto.youtubeLink === undefined) return dto;
+    if (dto.youtubeLink !== existing.youtubeLink) {
+      // Format already validated; bail without fetch on invalid link.
+      const videoId = extractVideoId(dto.youtubeLink);
+      if (!videoId) return dto;
+      if (dto.title !== undefined && dto.description !== undefined) return dto;
+      if (typeof youtubeFetcher !== 'function') return dto;
+      try {
+        const info = await youtubeFetcher(videoId);
+        const filled = { ...dto };
+        if (filled.title === undefined && info && typeof info.title === 'string' && info.title.trim() !== '') {
+          filled.title = info.title;
+        }
+        if (filled.description === undefined && info && typeof info.description === 'string' && info.description.trim() !== '') {
+          filled.description = info.description;
+        }
+        return filled;
+      } catch (e) {
+        console.warn(`YouTube fetch failed for ${videoId}: ${e?.message || e}`);
+        return dto;
+      }
+    }
+    return dto;
+  }
+
+  // Preview capability: fetchYouTubeData?videoId via injected fetcher.
+  // Kajian-only (adapter.withYouTube gate); news/blog have no youtube path.
+  async function fetchYouTubeData(typeOrVideoId, maybeVideoId) {
+    let type;
+    let videoId;
+    if (arguments.length >= 2) {
+      type = typeOrVideoId;
+      videoId = maybeVideoId;
+    } else {
+      type = 'kajian';
+      videoId = typeOrVideoId;
+    }
+    const adapter = getAdapter(type);
+    if (!adapter.withYouTube) {
+      throw new ValidationError('YouTube not supported for this ContentType');
+    }
+    if (typeof videoId !== 'string' || videoId.trim() === '') {
+      throw new ValidationError('videoId required');
+    }
+    if (typeof youtubeFetcher !== 'function') {
+      const err = new Error('YouTube fetcher not configured');
+      err.statusCode = 500;
+      throw err;
+    }
+    return youtubeFetcher(videoId.trim());
   }
 
   function normalizeUpdateArgs(argId, argDto, argUser) {
@@ -675,18 +775,19 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     if (!row) throw new NotFoundError(`${adapter.type} not found`);
     assertCanMutate(row, user);
     validateUpdateDto(adapter, dto);
-    if (dto.campaignId !== undefined && adapter.withCampaign) {
-      const raw = dto.campaignId;
+    let effectiveDto = await maybeAutofillKajianUpdate(adapter, dto, row);
+    if (effectiveDto.campaignId !== undefined && adapter.withCampaign) {
+      const raw = effectiveDto.campaignId;
       const campaignId = raw === null || raw === '' ? null : String(raw);
       if (campaignId && !(await campaignExists(campaignId))) {
         throw new ValidationError('Campaign not found');
       }
     }
     const oldImage = row.image;
-    const values = buildUpdateValues(adapter, dto, user);
+    const values = buildUpdateValues(adapter, effectiveDto, user);
     Object.assign(row, values);
     const newImage = row.image;
-    if (adapter.withCampaign && dto.image !== undefined && newImage !== oldImage && oldImage) {
+    if (adapter.withCampaign && effectiveDto.image !== undefined && newImage !== oldImage && oldImage) {
       await bestEffortMediaRemove(oldImage);
     }
     return mapJoinedById(adapter, row);
@@ -699,18 +800,19 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     if (!existing) throw new NotFoundError(`${adapter.type} not found`);
     assertCanMutate(existing, user);
     validateUpdateDto(adapter, dto);
-    if (dto.campaignId !== undefined && adapter.withCampaign) {
-      const raw = dto.campaignId;
+    let effectiveDto = await maybeAutofillKajianUpdate(adapter, dto, existing);
+    if (effectiveDto.campaignId !== undefined && adapter.withCampaign) {
+      const raw = effectiveDto.campaignId;
       const campaignId = raw === null || raw === '' ? null : String(raw);
       if (campaignId && !(await campaignExists(campaignId))) {
         throw new ValidationError('Campaign not found');
       }
     }
     const oldImage = existing.image;
-    const values = buildUpdateValues(adapter, dto, user);
+    const values = buildUpdateValues(adapter, effectiveDto, user);
     const [updated] = await db.update(table).set(values).where(eq(table.id, id)).returning();
     if (!updated) throw new NotFoundError(`${adapter.type} not found`);
-    if (adapter.withCampaign && dto.image !== undefined && updated.image !== oldImage && oldImage) {
+    if (adapter.withCampaign && effectiveDto.image !== undefined && updated.image !== oldImage && oldImage) {
       await bestEffortMediaRemove(oldImage);
     }
     const joined = await drizzleFetchJoinedById(adapter, id);
@@ -785,10 +887,11 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
       update: (rowId, payload, caller) => update(type, rowId, payload, caller),
       remove: (rowId, caller) => remove(type, rowId, caller),
       categories: () => categories(type),
+      fetchYouTubeData: (videoId) => fetchYouTubeData(type, videoId),
     };
   }
 
-  return { list, getBySlug, create, update, remove, categories, for: forType, forType };
+  return { list, getBySlug, create, update, remove, categories, fetchYouTubeData, for: forType, forType };
 }
 
 export { ValidationError, NotFoundError, ForbiddenError, ConflictError };
