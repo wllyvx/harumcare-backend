@@ -1,115 +1,43 @@
-import { eq, desc, and, sql, sum, count } from 'drizzle-orm';
+import { eq, desc, and, count } from 'drizzle-orm';
 import { donations, campaigns, users } from '../db/schema.js';
 import { removeMediaBestEffort } from '../modules/media/index.js';
+import { createDonationModule } from '../modules/donation/index.js';
 
 const removeMedia = (c, url) => removeMediaBestEffort(c.env?.BUCKET, url);
 
-// Helper to update campaign stats (currentAmount and donorCount)
-const updateCampaignStats = async (db, campaignId) => {
-    try {
-        const [stats] = await db.select({
-            totalAmount: sum(donations.amount),
-            totalDonors: count(donations.id)
-        })
-            .from(donations)
-            .where(
-                and(
-                    eq(donations.campaignId, campaignId),
-                    eq(donations.paymentStatus, 'completed')
-                )
-            );
+// Thin adapter over the deep Donation module (C02): all status transitions
+// and Campaign-stats writes live inside the module. This file only maps
+// HTTP ↔ module and module errors ↔ HTTP codes. The completed-transition
+// guard exists exactly once (inside the module) — no call-site copies.
+const getDonationModule = (c) => createDonationModule({ db: c.get('db') });
 
-        const currentAmount = Number(stats?.totalAmount || 0);
-        const donorCount = Number(stats?.totalDonors || 0);
+const toHttpStatus = (err) => err?.statusCode || 500;
 
-        await db.update(campaigns)
-            .set({ currentAmount, donorCount })
-            .where(eq(campaigns.id, campaignId));
-
-        console.log("Campaign updated with recalculated values:", {
-            campaignId,
-            currentAmount,
-            donorCount
-        });
-
-        return { currentAmount, donorCount };
-    } catch (error) {
-        console.error("Error updating campaign stats:", error);
-        throw error;
+const sendModuleError = (c, err, key = 'error') => {
+    const status = toHttpStatus(err);
+    if (status === 500) {
+        console.error('Donation module error:', err);
+        return c.json({ [key]: 'Server error' }, 500);
     }
+    return c.json({ [key]: err.message }, status);
 };
 
-// Helper to map donation result with joins
-const mapDonationResult = (row) => {
-    if (!row) return null;
-    return {
-        ...row.donations,
-        user: row.users ? {
-            nama: row.users.nama,
-            email: row.users.email
-        } : null,
-        campaign: row.campaigns ? {
-            title: row.campaigns.title,
-            imageUrl: row.campaigns.imageUrl
-        } : null
-    };
-};
-
-// Create donation
+// Create donation (thin adapter → module `create`; starts `pending`, totals untouched)
 export const createDonation = async (c) => {
     try {
-        const db = c.get('db');
         const body = await c.req.json();
         const user = c.get('user');
 
         console.log('Create donation - Request body:', body);
         console.log('Create donation - User from token:', user);
 
-        const { campaignId, amount, message, paymentMethod, donorName, isAnonymous, uniqueCode } = body;
-        const userId = user.userId;
+        // NOTE: `uniqueCode` intentionally dropped — no such column in schema.
+        const { campaignId, amount, message, paymentMethod, donorName, isAnonymous } = body;
 
-        // Validasi input
-        if (!campaignId || !amount || !paymentMethod) {
-            return c.json({ error: "Campaign ID, amount, dan payment method wajib diisi" }, 400);
-        }
-
-        if (amount < 1000) {
-            return c.json({ error: "Minimal donasi Rp 1.000" }, 400);
-        }
-
-        // Check if campaign exists and still active
-        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
-
-        if (!campaign) {
-            return c.json({ error: "Campaign tidak ditemukan" }, 404);
-        }
-
-        if (new Date() > new Date(campaign.endDate)) {
-            return c.json({ error: "Campaign sudah berakhir" }, 400);
-        }
-
-        // Get user info (optional validation, mostly handled by auth middleware but good for name)
-        const [userInfo] = await db.select().from(users).where(eq(users.id, userId));
-        if (!userInfo) {
-            return c.json({ error: "User tidak ditemukan" }, 404);
-        }
-
-        // Create transactionId (simple unique string)
-        const transactionId = `TRX-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-
-        // Create donation with pending status
-        const [donation] = await db.insert(donations).values({
-            campaignId,
-            userId,
-            amount,
-            message,
-            paymentMethod,
-            donorName: isAnonymous ? "Hamba Allah" : (donorName || userInfo.nama),
-            isAnonymous: !!isAnonymous,
-            paymentStatus: "pending",
-            uniqueCode: uniqueCode || null,
-            transactionId
-        }).returning();
+        const donation = await getDonationModule(c).create(
+            { campaignId, amount, message, paymentMethod, donorName, isAnonymous },
+            user
+        );
 
         return c.json({
             message: "Donasi telah dikirim dan menunggu approval dari admin",
@@ -120,10 +48,10 @@ export const createDonation = async (c) => {
                 amount: donation.amount,
                 paymentStatus: donation.paymentStatus,
                 paymentMethod: donation.paymentMethod,
-                uniqueCode: donation.uniqueCode,
             },
         }, 201);
     } catch (err) {
+        if (err?.statusCode) return sendModuleError(c, err, 'error');
         console.error("Error creating donation:", err);
         return c.json({ error: "Server error: " + err.message }, 500);
     }
@@ -269,34 +197,26 @@ export const getUserDonations = async (c) => {
     }
 };
 
-// Update payment status (for payment gateway webhook)
+// Update payment status (for payment gateway webhook; thin adapter → module `setStatus`)
 export const updatePaymentStatus = async (c) => {
     try {
         const db = c.get('db');
         const { transactionId, status } = await c.req.json();
+
+        if (!transactionId || !status) {
+            return c.json({ error: "Transaction ID dan status wajib diisi" }, 400);
+        }
 
         const [donation] = await db.select().from(donations).where(eq(donations.transactionId, transactionId));
         if (!donation) {
             return c.json({ error: "Donasi tidak ditemukan" }, 404);
         }
 
-        const oldStatus = donation.paymentStatus;
-
-        const updateData = { paymentStatus: status };
-        if (status === 'completed' && oldStatus !== 'completed') {
-            updateData.completedAt = new Date();
-        }
-
-        await db.update(donations)
-            .set(updateData)
-            .where(eq(donations.id, donation.id));
-
-        // Recalculate stats if status changed to/from completed
-        if (
-            (status === 'completed' && oldStatus !== 'completed') ||
-            (status !== 'completed' && oldStatus === 'completed')
-        ) {
-            await updateCampaignStats(db, donation.campaignId);
+        try {
+            await getDonationModule(c).setStatus(donation.id, status);
+        } catch (err) {
+            if (err?.statusCode) return sendModuleError(c, err, 'error');
+            throw err;
         }
 
         return c.json({ message: "Status pembayaran berhasil diupdate" });
@@ -407,7 +327,7 @@ export const getAllDonations = async (c) => {
     }
 };
 
-// Update donation status (admin only)
+// Update donation status (admin only; thin adapter → module `setStatus`)
 export const updateDonationStatus = async (c) => {
     try {
         const db = c.get('db');
@@ -420,34 +340,23 @@ export const updateDonationStatus = async (c) => {
 
         const { paymentStatus } = await c.req.json();
 
-        if (!["completed", "failed", "pending"].includes(paymentStatus)) {
-            return c.json({ message: "Invalid payment status" }, 400);
+        let updatedDonation;
+        try {
+            updatedDonation = await getDonationModule(c).setStatus(id, paymentStatus);
+        } catch (err) {
+            if (err?.statusCode) {
+                if (err.statusCode === 404) {
+                    return c.json({ message: "Donation not found" }, 404);
+                }
+                return sendModuleError(c, err, 'message');
+            }
+            throw err;
         }
 
-        const [donation] = await db.select().from(donations).where(eq(donations.id, id));
-        if (!donation) {
-            return c.json({ message: "Donation not found" }, 404);
-        }
-
-        const oldStatus = donation.paymentStatus;
-
-        const updateData = { paymentStatus };
-        if (paymentStatus === "completed") {
-            updateData.completedAt = new Date();
-        }
-
-        const [updatedDonation] = await db.update(donations)
-            .set(updateData)
-            .where(eq(donations.id, id))
-            .returning();
-
-        let updatedStats = null;
-        if (
-            (paymentStatus === 'completed' && oldStatus !== 'completed') ||
-            (paymentStatus !== 'completed' && oldStatus === 'completed')
-        ) {
-            updatedStats = await updateCampaignStats(db, donation.campaignId);
-        }
+        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, updatedDonation.campaignId));
+        const updatedStats = campaign
+            ? { currentAmount: campaign.currentAmount, donorCount: campaign.donorCount }
+            : null;
 
         return c.json({
             message: "Donation status updated successfully",
@@ -460,7 +369,7 @@ export const updateDonationStatus = async (c) => {
     }
 };
 
-// Delete donation (admin only)
+// Delete donation (admin only; thin adapter → module `remove` owns delete + recalc)
 export const deleteDonation = async (c) => {
     try {
         const db = c.get('db');
@@ -471,21 +380,27 @@ export const deleteDonation = async (c) => {
 
         const id = c.req.param('id');
 
-        const [donation] = await db.select().from(donations).where(eq(donations.id, id));
-        if (!donation) {
+        const [existing] = await db.select().from(donations).where(eq(donations.id, id));
+        if (!existing) {
             return c.json({ error: 'Donasi tidak ditemukan' }, 404);
         }
 
-        if (donation.proofOfTransfer) {
-            await removeMedia(c, donation.proofOfTransfer);
+        let removed;
+        try {
+            removed = await getDonationModule(c).remove(id);
+        } catch (err) {
+            if (err?.statusCode) return sendModuleError(c, err, 'error');
+            throw err;
         }
 
-        await db.delete(donations).where(eq(donations.id, id));
+        if (removed.proofOfTransfer) {
+            await removeMedia(c, removed.proofOfTransfer);
+        }
 
         let updatedStats = null;
-        // If donation was completed, update stats
-        if (donation.paymentStatus === 'completed') {
-            updatedStats = await updateCampaignStats(db, donation.campaignId);
+        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, removed.campaignId));
+        if (campaign) {
+            updatedStats = { currentAmount: campaign.currentAmount, donorCount: campaign.donorCount };
         }
 
         return c.json({
@@ -498,10 +413,9 @@ export const deleteDonation = async (c) => {
     }
 };
 
-// Create donation by admin
+// Create donation by admin (thin adapter → module `create` with unified validation)
 export const createDonationByAdmin = async (c) => {
     try {
-        const db = c.get('db');
         const user = c.get('user');
         if (user.role !== 'admin') {
             return c.json({ error: 'Akses ditolak. Hanya admin yang dapat mengakses fitur ini.' }, 403);
@@ -518,43 +432,15 @@ export const createDonationByAdmin = async (c) => {
             paymentStatus = 'pending'
         } = body;
 
-        // Validasi input
-        if (!campaignId || !amount || !paymentMethod || !donorName) {
-            return c.json({
-                error: "Campaign ID, jumlah donasi, metode pembayaran, dan nama donatur wajib diisi"
-            }, 400);
-        }
-
-        if (amount < 1000) {
-            return c.json({ error: "Minimal donasi Rp 1.000" }, 400);
-        }
-
-        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
-        if (!campaign) {
-            return c.json({ error: "Campaign tidak ditemukan" }, 404);
-        }
-
-        if (new Date() > new Date(campaign.endDate)) {
-            return c.json({ error: "Campaign sudah berakhir" }, 400);
-        }
-
-        const transactionId = `TRX-ADMIN-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-
-        const [donation] = await db.insert(donations).values({
-            campaignId,
-            userId: user.userId,
-            amount,
-            message,
-            paymentMethod,
-            donorName: isAnonymous ? "Hamba Allah" : donorName,
-            isAnonymous: !!isAnonymous,
-            paymentStatus,
-            completedAt: paymentStatus === 'completed' ? new Date() : undefined,
-            transactionId
-        }).returning();
-
-        if (paymentStatus === 'completed') {
-            await updateCampaignStats(db, campaignId);
+        let donation;
+        try {
+            donation = await getDonationModule(c).create(
+                { campaignId, amount, message, paymentMethod, donorName, isAnonymous, paymentStatus },
+                user
+            );
+        } catch (err) {
+            if (err?.statusCode) return sendModuleError(c, err, 'error');
+            throw err;
         }
 
         return c.json({

@@ -4,6 +4,7 @@ export function createFakeDb(seed = {}) {
   const tables = {
     users: [...(seed.users || [])],
     campaigns: [...(seed.campaigns || [])],
+    donations: [...(seed.donations || [])],
     news: [...(seed.news || [])],
     blogs: [...(seed.blogs || [])],
     kajians: [...(seed.kajians || [])],
