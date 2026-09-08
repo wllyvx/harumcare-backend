@@ -1,6 +1,13 @@
 import { vi } from 'vitest';
 
-export function createFakeDb() {
+export function createFakeDb(seed = {}) {
+  const tables = {
+    users: [...(seed.users || [])],
+    campaigns: [...(seed.campaigns || [])],
+    news: [...(seed.news || [])],
+    blogs: [...(seed.blogs || [])],
+    kajians: [...(seed.kajians || [])],
+  };
   const chain = () => ({
     from: () => chain(),
     where: () => chain(),
@@ -11,6 +18,8 @@ export function createFakeDb() {
     then: (resolve) => Promise.resolve([]).then(resolve),
   });
   return {
+    __isFakeDb: true,
+    __tables: tables,
     select: () => chain(),
     selectDistinct: () => chain(),
     insert: () => ({ values: () => ({ returning: async () => [] }) }),

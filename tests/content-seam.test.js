@@ -29,7 +29,9 @@ describe('createContentModule DI seam', () => {
     expect(typeof mod.update).toBe('function');
     expect(typeof mod.remove).toBe('function');
     expect(typeof mod.categories).toBe('function');
-    expect(mod.list.length).toBe(1);
+    expect(typeof mod.for).toBe('function');
+    expect(typeof mod.forType).toBe('function');
+    expect(mod.list.length).toBe(3);
     expect(mod.getBySlug.length).toBe(1);
     expect(mod.create.length).toBe(2);
     expect(mod.update.length).toBe(3);
@@ -52,7 +54,9 @@ describe('createContentModule DI seam', () => {
     const media = createFakeMedia();
     const ytf = createFakeYoutubeFetcher();
     const mod = createContentModule({ db, media, youtubeFetcher: ytf });
-    await expect(mod.list({})).rejects.toThrow(/not implemented/);
+    // list + categories work against the in-memory fake without real D1/R2/network
+    const res = await mod.list('news', {});
+    expect(res).toEqual({ items: [], total: 0, page: 1, totalPages: 0 });
     await expect(mod.getBySlug('x')).rejects.toThrow(/not implemented/);
     expect(ytf).not.toHaveBeenCalled();
   });
