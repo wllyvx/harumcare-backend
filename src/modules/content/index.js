@@ -2,7 +2,7 @@ import { and, or, eq, count, desc, sql } from 'drizzle-orm';
 import { users as usersTable, campaigns as campaignsTable } from '../../db/schema.js';
 import { ValidationError, NotFoundError, ForbiddenError, ConflictError } from './errors.js';
 import { getAdapter } from './adapters.js';
-import { clampPageLimit, escapeLike } from './helpers.js';
+import { clampPageLimit, escapeLike, slugify } from './helpers.js';
 
 export function createContentModule({ db, media, youtubeFetcher } = {}) {
   if (!db) throw new Error('createContentModule requires db');
@@ -250,8 +250,218 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     return drizzleGetBySlug(adapter, slug);
   }
 
-  async function create(dto, user) {
-    throw new Error('not implemented: create');
+  function normalizeCreateArgs(typeOrDto, dtoOrUser, maybeUser) {
+    let type;
+    let dto;
+    let user;
+    if (typeof typeOrDto === 'string') {
+      type = typeOrDto;
+      dto = dtoOrUser || {};
+      user = maybeUser ?? null;
+    } else {
+      dto = typeOrDto || {};
+      type = dto.type;
+      user = dtoOrUser ?? dto.user ?? null;
+    }
+    if (!type) throw new ValidationError('ContentType required');
+    if (!dto || typeof dto !== 'object') throw new ValidationError('Invalid payload');
+    return { type, dto, user };
+  }
+
+  function requireNonEmpty(dto, field, label) {
+    const v = dto[field];
+    if (typeof v !== 'string' || v.trim() === '') throw new ValidationError(`${label} required`);
+    return v;
+  }
+
+  function resolveCreateAuthorId(user) {
+    if (!user || user.userId === undefined || user.userId === null || String(user.userId) === '') {
+      throw new ForbiddenError('Authentication required');
+    }
+    return String(user.userId);
+  }
+
+  function validateCreateDto(adapter, dto) {
+    requireNonEmpty(dto, 'title', 'Title');
+    if (adapter.type === 'kajian') {
+      requireNonEmpty(dto, 'description', 'Description');
+      requireNonEmpty(dto, 'youtubeLink', 'YoutubeLink');
+    } else {
+      requireNonEmpty(dto, 'content', 'Content');
+    }
+    requireNonEmpty(dto, 'category', 'Category');
+    requireNonEmpty(dto, 'status', 'Status');
+  }
+
+  function normalizeCreateCampaignId(adapter, dto) {
+    if (!adapter.withCampaign) return null;
+    const raw = dto.campaignId;
+    if (raw === undefined || raw === null || raw === '') return null;
+    return String(raw);
+  }
+
+  // Server-owned timestamps: body createdAt is ignored unless the caller is
+  // admin with a valid ISO date (import/backfill case); an admin-supplied
+  // invalid value is Validation 400. updatedAt is always server-owned.
+  function resolveCreateCreatedAt(dto, user) {
+    const raw = dto.createdAt;
+    if (raw === undefined || raw === null || raw === '') return new Date();
+    if (user?.role === 'admin') {
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) throw new ValidationError('Invalid createdAt: must be a valid date');
+      return d;
+    }
+    return new Date();
+  }
+
+  function authorFromCallerOrRow(user, rowAuthor) {
+    if (
+      user &&
+      typeof user.nama === 'string' && user.nama !== '' &&
+      typeof user.username === 'string' && user.username !== ''
+    ) {
+      return { nama: user.nama, username: user.username };
+    }
+    return rowAuthor;
+  }
+
+  async function campaignExists(campaignId) {
+    if (isMemoryDb) {
+      return (db.__tables.campaigns || []).some((c) => String(c.id) === String(campaignId));
+    }
+    const rows = await db
+      .select({ id: campaignsTable.id })
+      .from(campaignsTable)
+      .where(eq(campaignsTable.id, campaignId))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async function slugExists(adapter, slug) {
+    if (isMemoryDb) {
+      return (db.__tables[adapter.tableName] || []).some((r) => r.slug === slug);
+    }
+    const rows = await db
+      .select({ id: adapter.table.id })
+      .from(adapter.table)
+      .where(eq(adapter.table.slug, slug))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  function isSlugUniqueViolation(e) {
+    const msg = e && typeof e.message === 'string' ? e.message : '';
+    return /unique/i.test(msg) && /slug/i.test(msg);
+  }
+
+  function buildCreateValues(adapter, dto, { authorId, campaignId, slug, createdAt }) {
+    const now = new Date();
+    const values = {
+      title: dto.title,
+      slug,
+      category: dto.category,
+      status: dto.status,
+      authorId,
+      viewCount: 0,
+      createdAt,
+      updatedAt: now,
+    };
+    if (adapter.type === 'kajian') {
+      values.description = dto.description;
+      values.youtubeLink = dto.youtubeLink;
+    } else {
+      values.content = dto.content;
+      values.image = dto.image || 'images/empty-image-placeholder.webp';
+      values.campaignId = campaignId;
+    }
+    return values;
+  }
+
+  function memoryCreateInsert(adapter, values) {
+    const row = {
+      id: typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      ...values,
+    };
+    db.__tables[adapter.tableName].push(row);
+    const tables = db.__tables;
+    const u = (tables.users || []).find((x) => String(x.id) === String(row.authorId)) || null;
+    const camp =
+      adapter.withCampaign && row.campaignId
+        ? (tables.campaigns || []).find((x) => String(x.id) === String(row.campaignId)) || null
+        : null;
+    return adapter.mapRow({
+      [adapter.alias]: row,
+      users: u ? { nama: u.nama, username: u.username } : null,
+      campaigns: camp ? { title: camp.title, imageUrl: camp.imageUrl } : null,
+    });
+  }
+
+  async function drizzleCreateInsert(adapter, values) {
+    const table = adapter.table;
+    const [inserted] = await db.insert(table).values(values).returning();
+    // Single joined fetch for Author + CampaignRef (one row, not N+1).
+    // Kajian skips the Campaign join entirely.
+    let rows;
+    if (adapter.withCampaign) {
+      rows = await db
+        .select({
+          [adapter.alias]: table,
+          users: { nama: usersTable.nama, username: usersTable.username },
+          campaigns: { title: campaignsTable.title, imageUrl: campaignsTable.imageUrl },
+        })
+        .from(table)
+        .leftJoin(usersTable, eq(table.authorId, usersTable.id))
+        .leftJoin(campaignsTable, eq(table.campaignId, campaignsTable.id))
+        .where(eq(table.id, inserted.id))
+        .limit(1);
+    } else {
+      rows = await db
+        .select({
+          [adapter.alias]: table,
+          users: { nama: usersTable.nama, username: usersTable.username },
+        })
+        .from(table)
+        .leftJoin(usersTable, eq(table.authorId, usersTable.id))
+        .where(eq(table.id, inserted.id))
+        .limit(1);
+    }
+    return adapter.mapRow(rows[0]);
+  }
+
+  async function create(typeOrDto, dtoOrUser, maybeUser) {
+    const { type, dto, user } = normalizeCreateArgs(typeOrDto, dtoOrUser, maybeUser);
+    const adapter = getAdapter(type);
+    const authorId = resolveCreateAuthorId(user);
+    validateCreateDto(adapter, dto);
+    const campaignId = normalizeCreateCampaignId(adapter, dto);
+    if (campaignId && !(await campaignExists(campaignId))) {
+      throw new ValidationError('Campaign not found');
+    }
+    const createdAt = resolveCreateCreatedAt(dto, user);
+
+    const base = slugify(dto.title);
+    if (!base) throw new ValidationError('Title must produce a valid slug');
+
+    // Slug uniqueness loop: base, base-2, base-3 … up to 100 attempts, so a
+    // duplicate title never surfaces a unique-constraint 400. The insert is
+    // also guarded: on a slug race the loop continues with the next candidate.
+    for (let attempt = 1; attempt <= 100; attempt++) {
+      const slug = attempt === 1 ? base : `${base}-${attempt}`;
+      if (await slugExists(adapter, slug)) continue;
+      const values = buildCreateValues(adapter, dto, { authorId, campaignId, slug, createdAt });
+      try {
+        const item =
+          isMemoryDb
+            ? memoryCreateInsert(adapter, values)
+            : await drizzleCreateInsert(adapter, values);
+        item.author = authorFromCallerOrRow(user, item.author);
+        return item;
+      } catch (e) {
+        if (!isMemoryDb && isSlugUniqueViolation(e)) continue;
+        throw e;
+      }
+    }
+    throw new ConflictError('Could not generate a unique slug');
   }
 
   async function update(id, dto, user) {
@@ -289,7 +499,8 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
         slugOrObj && typeof slugOrObj === 'object'
           ? getBySlug({ ...slugOrObj, type })
           : getBySlug(type, slugOrObj),
-      create: (...args) => create(...args),
+      create: (dto, user) =>
+        dto && typeof dto === 'object' ? create({ ...dto, type }, user) : create(type, dto, user),
       update: (...args) => update(...args),
       remove: (...args) => remove(...args),
       categories: () => categories(type),

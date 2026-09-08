@@ -33,7 +33,7 @@ describe('createContentModule DI seam', () => {
     expect(typeof mod.forType).toBe('function');
     expect(mod.list.length).toBe(3);
     expect(mod.getBySlug.length).toBe(2);
-    expect(mod.create.length).toBe(2);
+    expect(mod.create.length).toBe(3);
     expect(mod.update.length).toBe(3);
     expect(mod.remove.length).toBe(2);
     expect(mod.categories.length).toBe(1);
