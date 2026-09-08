@@ -464,12 +464,293 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
     throw new ConflictError('Could not generate a unique slug');
   }
 
+  const VALID_UPDATE_STATUSES = ['draft', 'published'];
+
+  function extractVideoId(url) {
+    if (typeof url !== 'string') return null;
+    const patterns = [
+      /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([^&\n?#]+)/,
+      /(?:https?:\/\/)?(?:www\.)?youtu\.be\/([^&\n?#]+)/,
+      /(?:https?:\/\/)?(?:www\.)?youtube\.com\/live\/([^&\n?#]+)/,
+    ];
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  function normalizeUpdateArgs(argId, argDto, argUser) {
+    const rawArgs = Array.from(arguments);
+    // 4-arg form: update(type, id, dto, user) — used by forType binding.
+    if (rawArgs.length >= 4 && typeof rawArgs[0] === 'string') {
+      const [type, id, dto, user] = rawArgs;
+      if (!type) throw new ValidationError('ContentType required');
+      if (id === undefined || id === null || id === '') throw new ValidationError('id required');
+      return { type, id: String(id), dto: dto || {}, user: user ?? null };
+    }
+    // 3-arg with (type, {id,...dto}, user)
+    if (typeof argId === 'string' && argDto && typeof argDto === 'object' && !Array.isArray(argDto) && 'id' in argDto && !('type' in argDto)) {
+      const { id, ...rest } = argDto;
+      if (!argId) throw new ValidationError('ContentType required');
+      if (id === undefined || id === null || id === '') throw new ValidationError('id required');
+      return { type: argId, id: String(id), dto: rest, user: argUser ?? null };
+    }
+    // 3-arg with (id, {type,...dto}, user)
+    if (typeof argId === 'string' && argDto && typeof argDto === 'object' && !Array.isArray(argDto) && 'type' in argDto) {
+      const { type, ...rest } = argDto;
+      if (!type) throw new ValidationError('ContentType required');
+      if (argId === '') throw new ValidationError('id required');
+      return { type, id: String(argId), dto: rest, user: argUser ?? null };
+    }
+    // Object form: update({type, id, ...dto}, user)
+    if (argId && typeof argId === 'object' && !Array.isArray(argId)) {
+      const { type, id, ...rest } = argId;
+      const user = argDto ?? null;
+      if (!type) throw new ValidationError('ContentType required');
+      if (id === undefined || id === null || id === '') throw new ValidationError('id required');
+      return { type, id: String(id), dto: rest, user };
+    }
+    throw new ValidationError('ContentType and id required');
+  }
+
+  function normalizeRemoveArgs(argId, argUser) {
+    const rawArgs = Array.from(arguments);
+    // 3-arg form: remove(type, id, user) — used by forType binding.
+    if (rawArgs.length >= 3 && typeof rawArgs[0] === 'string') {
+      const [type, id, user] = rawArgs;
+      if (!type) throw new ValidationError('ContentType required');
+      if (id === undefined || id === null || id === '') throw new ValidationError('id required');
+      return { type, id: String(id), user: user ?? null };
+    }
+    // Object form: remove({type, id}, user)
+    if (argId && typeof argId === 'object' && !Array.isArray(argId)) {
+      const { type, id } = argId;
+      if (!type) throw new ValidationError('ContentType required');
+      if (id === undefined || id === null || id === '') throw new ValidationError('id required');
+      return { type, id: String(id), user: argUser ?? null };
+    }
+    // (id, user) without type cannot resolve ContentType — require object form.
+    throw new ValidationError('ContentType and id required');
+  }
+
+  function assertCanMutate(row, user) {
+    if (!user || user.userId === undefined || user.userId === null || String(user.userId) === '') {
+      throw new ForbiddenError('Authentication required');
+    }
+    if (String(row.authorId) !== String(user.userId) && user.role !== 'admin') {
+      throw new ForbiddenError('Not allowed to modify this content');
+    }
+  }
+
+  function validateUpdateDto(adapter, dto) {
+    if (!dto || typeof dto !== 'object' || Array.isArray(dto)) {
+      throw new ValidationError('Invalid payload');
+    }
+    const checkNonEmpty = (field, label) => {
+      const v = dto[field];
+      if (v === undefined) return;
+      if (typeof v !== 'string' || v.trim() === '') {
+        throw new ValidationError(`${label} must be a non-empty string`);
+      }
+    };
+    checkNonEmpty('title', 'Title');
+    checkNonEmpty('category', 'Category');
+    if (adapter.type === 'kajian') {
+      checkNonEmpty('description', 'Description');
+      if (dto.youtubeLink !== undefined) {
+        if (typeof dto.youtubeLink !== 'string' || dto.youtubeLink.trim() === '') {
+          throw new ValidationError('YoutubeLink must be a non-empty string');
+        }
+        if (!extractVideoId(dto.youtubeLink)) {
+          throw new ValidationError('Invalid youtubeLink');
+        }
+      }
+    } else {
+      checkNonEmpty('content', 'Content');
+      if (dto.image !== undefined) {
+        if (typeof dto.image !== 'string' || dto.image.trim() === '') {
+          throw new ValidationError('Image must be a non-empty string');
+        }
+      }
+    }
+    if (dto.status !== undefined) {
+      if (!VALID_UPDATE_STATUSES.includes(dto.status)) {
+        throw new ValidationError('Invalid status: must be draft or published');
+      }
+    }
+    if (dto.campaignId !== undefined && adapter.withCampaign) {
+      const raw = dto.campaignId;
+      if (!(raw === null || raw === '' || typeof raw === 'string')) {
+        throw new ValidationError('Invalid campaignId');
+      }
+    }
+  }
+
+  async function bestEffortMediaRemove(url) {
+    if (!url || typeof url !== 'string' || url === '') return;
+    try {
+      await media.remove(url);
+    } catch (e) {
+      console.warn(`best-effort media.remove failed for ${url}: ${e?.message || e}`);
+    }
+  }
+
+  function buildUpdateValues(adapter, dto, user) {
+    const values = {};
+    if (dto.title !== undefined) values.title = dto.title;
+    if (adapter.type === 'kajian') {
+      if (dto.description !== undefined) values.description = dto.description;
+      if (dto.youtubeLink !== undefined) values.youtubeLink = dto.youtubeLink;
+    } else {
+      if (dto.content !== undefined) values.content = dto.content;
+      if (dto.image !== undefined) values.image = dto.image;
+      if (dto.campaignId !== undefined) {
+        const raw = dto.campaignId;
+        values.campaignId = raw === null || raw === '' ? null : String(raw);
+      }
+    }
+    if (dto.category !== undefined) values.category = dto.category;
+    if (dto.status !== undefined) values.status = dto.status;
+    // createdAt stays server-owned: only admin with valid ISO may backfill.
+    if (dto.createdAt !== undefined && dto.createdAt !== null && dto.createdAt !== '') {
+      if (user?.role === 'admin') {
+        const d = new Date(dto.createdAt);
+        if (Number.isNaN(d.getTime())) throw new ValidationError('Invalid createdAt: must be a valid date');
+        values.createdAt = d;
+      }
+    }
+    // updatedAt always server-owned; client value ignored.
+    values.updatedAt = new Date();
+    return values;
+  }
+
+  function mapJoinedById(adapter, row) {
+    const tables = db.__tables;
+    const u = (tables.users || []).find((x) => String(x.id) === String(row.authorId)) || null;
+    const camp =
+      adapter.withCampaign && row.campaignId
+        ? (tables.campaigns || []).find((x) => String(x.id) === String(row.campaignId)) || null
+        : null;
+    return adapter.mapRow({
+      [adapter.alias]: row,
+      users: u ? { nama: u.nama, username: u.username } : null,
+      campaigns: camp ? { title: camp.title, imageUrl: camp.imageUrl } : null,
+    });
+  }
+
+  async function drizzleFetchJoinedById(adapter, id) {
+    const table = adapter.table;
+    let rows;
+    if (adapter.withCampaign) {
+      rows = await db
+        .select({
+          [adapter.alias]: table,
+          users: { nama: usersTable.nama, username: usersTable.username },
+          campaigns: { title: campaignsTable.title, imageUrl: campaignsTable.imageUrl },
+        })
+        .from(table)
+        .leftJoin(usersTable, eq(table.authorId, usersTable.id))
+        .leftJoin(campaignsTable, eq(table.campaignId, campaignsTable.id))
+        .where(eq(table.id, id))
+        .limit(1);
+    } else {
+      rows = await db
+        .select({
+          [adapter.alias]: table,
+          users: { nama: usersTable.nama, username: usersTable.username },
+        })
+        .from(table)
+        .leftJoin(usersTable, eq(table.authorId, usersTable.id))
+        .where(eq(table.id, id))
+        .limit(1);
+    }
+    if (!rows[0]) return null;
+    return adapter.mapRow(rows[0]);
+  }
+
+  async function memoryUpdate(adapter, id, dto, user) {
+    const rows = db.__tables[adapter.tableName] || [];
+    const row = rows.find((r) => String(r.id) === String(id));
+    if (!row) throw new NotFoundError(`${adapter.type} not found`);
+    assertCanMutate(row, user);
+    validateUpdateDto(adapter, dto);
+    if (dto.campaignId !== undefined && adapter.withCampaign) {
+      const raw = dto.campaignId;
+      const campaignId = raw === null || raw === '' ? null : String(raw);
+      if (campaignId && !(await campaignExists(campaignId))) {
+        throw new ValidationError('Campaign not found');
+      }
+    }
+    const oldImage = row.image;
+    const values = buildUpdateValues(adapter, dto, user);
+    Object.assign(row, values);
+    const newImage = row.image;
+    if (adapter.withCampaign && dto.image !== undefined && newImage !== oldImage && oldImage) {
+      await bestEffortMediaRemove(oldImage);
+    }
+    return mapJoinedById(adapter, row);
+  }
+
+  async function drizzleUpdate(adapter, id, dto, user) {
+    const table = adapter.table;
+    const existingRows = await db.select().from(table).where(eq(table.id, id)).limit(1);
+    const existing = existingRows[0];
+    if (!existing) throw new NotFoundError(`${adapter.type} not found`);
+    assertCanMutate(existing, user);
+    validateUpdateDto(adapter, dto);
+    if (dto.campaignId !== undefined && adapter.withCampaign) {
+      const raw = dto.campaignId;
+      const campaignId = raw === null || raw === '' ? null : String(raw);
+      if (campaignId && !(await campaignExists(campaignId))) {
+        throw new ValidationError('Campaign not found');
+      }
+    }
+    const oldImage = existing.image;
+    const values = buildUpdateValues(adapter, dto, user);
+    const [updated] = await db.update(table).set(values).where(eq(table.id, id)).returning();
+    if (!updated) throw new NotFoundError(`${adapter.type} not found`);
+    if (adapter.withCampaign && dto.image !== undefined && updated.image !== oldImage && oldImage) {
+      await bestEffortMediaRemove(oldImage);
+    }
+    const joined = await drizzleFetchJoinedById(adapter, id);
+    return joined ?? adapter.mapRow({ [adapter.alias]: updated, users: null, campaigns: null });
+  }
+
   async function update(id, dto, user) {
-    throw new Error('not implemented: update');
+    const { type, id: rowId, dto: payload, user: caller } = normalizeUpdateArgs(...Array.from(arguments));
+    const adapter = getAdapter(type);
+    if (isMemoryDb) return memoryUpdate(adapter, rowId, payload, caller);
+    return drizzleUpdate(adapter, rowId, payload, caller);
+  }
+
+  async function memoryRemove(adapter, id, user) {
+    const rows = db.__tables[adapter.tableName] || [];
+    const idx = rows.findIndex((r) => String(r.id) === String(id));
+    if (idx === -1) throw new NotFoundError(`${adapter.type} not found`);
+    const row = rows[idx];
+    assertCanMutate(row, user);
+    const oldImage = row.image;
+    rows.splice(idx, 1);
+    if (oldImage) await bestEffortMediaRemove(oldImage);
+  }
+
+  async function drizzleRemove(adapter, id, user) {
+    const table = adapter.table;
+    const existingRows = await db.select().from(table).where(eq(table.id, id)).limit(1);
+    const existing = existingRows[0];
+    if (!existing) throw new NotFoundError(`${adapter.type} not found`);
+    assertCanMutate(existing, user);
+    const oldImage = existing.image;
+    await db.delete(table).where(eq(table.id, id));
+    if (oldImage) await bestEffortMediaRemove(oldImage);
   }
 
   async function remove(id, user) {
-    throw new Error('not implemented: remove');
+    const { type, id: rowId, user: caller } = normalizeRemoveArgs(...Array.from(arguments));
+    const adapter = getAdapter(type);
+    if (isMemoryDb) return memoryRemove(adapter, rowId, caller);
+    return drizzleRemove(adapter, rowId, caller);
   }
 
   async function categories(type) {
@@ -501,8 +782,8 @@ export function createContentModule({ db, media, youtubeFetcher } = {}) {
           : getBySlug(type, slugOrObj),
       create: (dto, user) =>
         dto && typeof dto === 'object' ? create({ ...dto, type }, user) : create(type, dto, user),
-      update: (...args) => update(...args),
-      remove: (...args) => remove(...args),
+      update: (rowId, payload, caller) => update(type, rowId, payload, caller),
+      remove: (rowId, caller) => remove(type, rowId, caller),
       categories: () => categories(type),
     };
   }
