@@ -1,7 +1,7 @@
 import { eq, desc, and, count } from 'drizzle-orm';
 import { timingSafeEqual } from 'node:crypto';
 import { donations, campaigns, users } from '../db/schema.js';
-import { removeMediaBestEffort } from '../modules/media/index.js';
+import { removeMediaBestEffort, createMedia } from '../modules/media/index.js';
 import { createDonationModule } from '../modules/donation/index.js';
 
 const removeMedia = (c, url) => removeMediaBestEffort(c.env?.BUCKET, url);
@@ -10,7 +10,7 @@ const removeMedia = (c, url) => removeMediaBestEffort(c.env?.BUCKET, url);
 // and Campaign-stats writes live inside the module. This file only maps
 // HTTP ↔ module and module errors ↔ HTTP codes. The completed-transition
 // guard exists exactly once (inside the module) — no call-site copies.
-const getDonationModule = (c) => createDonationModule({ db: c.get('db') });
+const getDonationModule = (c) => createDonationModule({ db: c.get('db'), media: createMedia({ bucket: c.env?.BUCKET }) });
 
 const toHttpStatus = (err) => err?.statusCode || 500;
 
@@ -75,36 +75,22 @@ export const createDonation = async (c) => {
     }
 };
 
-// Update donation with proof of transfer
+// Update donation with proof of transfer (thin adapter → module `updateProof`
+// owns ownership check, DB write, and best-effort old-media removal)
 export const updateDonationProof = async (c) => {
     try {
-        const db = c.get('db');
         const donationId = c.req.param('donationId');
 
         const { proofOfTransfer } = await c.req.json();
 
-        if (!proofOfTransfer) {
-            return c.json({ error: "Bukti transfer wajib diisi" }, 400);
-        }
-
-        const [donation] = await db.select().from(donations).where(eq(donations.id, donationId));
-        if (!donation) {
-            return c.json({ error: "Donasi tidak ditemukan" }, 404);
-        }
-
-        // Check ownership
         const user = c.get('user');
-        if (donation.userId !== user.userId) {
-            return c.json({ error: "Akses ditolak" }, 403);
-        }
 
-        const [updatedDonation] = await db.update(donations)
-            .set({ proofOfTransfer })
-            .where(eq(donations.id, donationId))
-            .returning();
-
-        if (updatedDonation && donation.proofOfTransfer && proofOfTransfer !== donation.proofOfTransfer) {
-            await removeMedia(c, donation.proofOfTransfer);
+        let updatedDonation;
+        try {
+            updatedDonation = await getDonationModule(c).updateProof(donationId, proofOfTransfer, user);
+        } catch (err) {
+            if (err?.statusCode) return sendModuleError(c, err, 'error');
+            throw err;
         }
 
         return c.json({ message: "Bukti transfer berhasil diunggah", donation: updatedDonation });

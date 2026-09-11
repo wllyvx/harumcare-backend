@@ -386,7 +386,56 @@ export function createDonationModule({ db, media, generateTransactionId } = {}) 
     return donation;
   }
 
-  return { create, complete, fail, setStatus, remove, recalcStats, getByTransactionId };
+  async function bestEffortMediaRemove(url) {
+    if (!url || typeof url !== 'string' || url === '') return;
+    if (!media || typeof media.remove !== 'function') return;
+    try {
+      await media.remove(url);
+    } catch (e) {
+      console.warn(`best-effort media.remove failed for ${url}: ${e?.message || e}`);
+    }
+  }
+
+  async function memoryUpdateProof(id, proofUrl, user) {
+    const row = memoryGet(id);
+    assertProofOwner(row, user);
+    const old = row.proofOfTransfer;
+    row.proofOfTransfer = proofUrl;
+    if (old && old !== proofUrl) await bestEffortMediaRemove(old);
+    return { ...row };
+  }
+
+  async function drizzleUpdateProof(id, proofUrl, user) {
+    const existing = await drizzleGet(id);
+    assertProofOwner(existing, user);
+    const old = existing.proofOfTransfer;
+    const [updated] = await db.update(donationsTable).set({ proofOfTransfer: proofUrl }).where(eq(donationsTable.id, id)).returning();
+    if (!updated) throw new NotFoundError('Donasi tidak ditemukan');
+    if (old && old !== proofUrl) await bestEffortMediaRemove(old);
+    return updated;
+  }
+
+  function assertProofOwner(donation, user) {
+    if (!user || user.userId === undefined || user.userId === null || String(user.userId) === '') {
+      throw new ForbiddenError('Akses ditolak');
+    }
+    if (String(donation.userId) !== String(user.userId)) {
+      throw new ForbiddenError('Akses ditolak');
+    }
+  }
+
+  // Proof-of-transfer seam (C02-T2): owner-only URL replacement.
+  // DB update always commits; old-file removal is best-effort after the
+  // write (media failure warns, never fails the DB update).
+  async function updateProof(id, proofUrl, user) {
+    if (typeof proofUrl !== 'string' || proofUrl.trim() === '') {
+      throw new ValidationError('Bukti transfer wajib diisi');
+    }
+    if (isMemoryDb) return memoryUpdateProof(id, proofUrl, user);
+    return drizzleUpdateProof(id, proofUrl, user);
+  }
+
+  return { create, complete, fail, setStatus, remove, recalcStats, getByTransactionId, updateProof };
 }
 
 export { ValidationError, NotFoundError, ForbiddenError, ConflictError };
