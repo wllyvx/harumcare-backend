@@ -167,6 +167,36 @@ export function createDonationModule({ db, media, generateTransactionId } = {}) 
     return rows[0];
   }
 
+  // Joined lookup by transaction ID for the webhook + owner-or-admin
+  // transaction lookup adapters. Memory path reads `__tables` directly (same
+  // seam as the transition methods); drizzle path runs the join query.
+  // Returns null when unknown; adapters own the 404/403 mapping.
+  async function getByTransactionId(transactionId) {
+    if (isMemoryDb) {
+      const donation = (db.__tables.donations || []).find((d) => d.transactionId === transactionId) || null;
+      if (!donation) return null;
+      const campaign = (db.__tables.campaigns || []).find((x) => String(x.id) === String(donation.campaignId));
+      const donor = (db.__tables.users || []).find((x) => String(x.id) === String(donation.userId));
+      return {
+        donation: { ...donation },
+        campaign: campaign ? { title: campaign.title } : null,
+        donor: donor ? { nama: donor.nama, email: donor.email } : null,
+      };
+    }
+    const rows = await db.select({
+      donations: donationsTable,
+      campaigns: { title: campaignsTable.title },
+      users: { nama: usersTable.nama, email: usersTable.email },
+    })
+      .from(donationsTable)
+      .leftJoin(campaignsTable, eq(donationsTable.campaignId, campaignsTable.id))
+      .leftJoin(usersTable, eq(donationsTable.userId, usersTable.id))
+      .where(eq(donationsTable.transactionId, transactionId))
+      .limit(1);
+    if (!rows[0]) return null;
+    return { donation: rows[0].donations, campaign: rows[0].campaigns, donor: rows[0].users };
+  }
+
   // Atomic transition core: donation write + stats rewrite commit together.
   // Memory path snapshots both tables and rolls back on any failure
   // (including the `__failAfterDonationWrite` failing-batch injector used in tests).
@@ -356,7 +386,7 @@ export function createDonationModule({ db, media, generateTransactionId } = {}) 
     return donation;
   }
 
-  return { create, complete, fail, setStatus, remove, recalcStats };
+  return { create, complete, fail, setStatus, remove, recalcStats, getByTransactionId };
 }
 
 export { ValidationError, NotFoundError, ForbiddenError, ConflictError };

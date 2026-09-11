@@ -1,4 +1,5 @@
 import { eq, desc, and, count } from 'drizzle-orm';
+import { timingSafeEqual } from 'node:crypto';
 import { donations, campaigns, users } from '../db/schema.js';
 import { removeMediaBestEffort } from '../modules/media/index.js';
 import { createDonationModule } from '../modules/donation/index.js';
@@ -12,6 +13,23 @@ const removeMedia = (c, url) => removeMediaBestEffort(c.env?.BUCKET, url);
 const getDonationModule = (c) => createDonationModule({ db: c.get('db') });
 
 const toHttpStatus = (err) => err?.statusCode || 500;
+
+// Webhook shared-secret check (C02-T6): the payment gateway proves itself
+// with `x-webhook-secret: <PAYMENT_WEBHOOK_SECRET>`. Compared timing-safe;
+// a missing server secret fails CLOSED (503) so the endpoint can never
+// drift back into a public unauthenticated writer.
+const WEBHOOK_SECRET_HEADER = 'x-webhook-secret';
+
+const webhookSecretsEqual = (provided, expected) => {
+    if (typeof provided !== 'string' || typeof expected !== 'string') return false;
+    if (provided.length === 0 || expected.length === 0) return false;
+    const a = Buffer.from(provided, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    // Length check first is the standard timingSafeEqual idiom (secrets are
+    // fixed-length high-entropy values, so length reveals nothing useful).
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+};
 
 const sendModuleError = (c, err, key = 'error') => {
     const status = toHttpStatus(err);
@@ -197,23 +215,32 @@ export const getUserDonations = async (c) => {
     }
 };
 
-// Update payment status (for payment gateway webhook; thin adapter → module `setStatus`)
+// Update payment status (payment gateway webhook; shared-secret locked.
+// Thin adapter → module `setStatus`; auth checked before body validation
+// so unauthenticated callers learn nothing about payload shape.)
 export const updatePaymentStatus = async (c) => {
     try {
-        const db = c.get('db');
+        const configured = c.env?.PAYMENT_WEBHOOK_SECRET;
+        if (!configured) {
+            return c.json({ error: 'Webhook not configured' }, 503);
+        }
+        if (!webhookSecretsEqual(c.req.header(WEBHOOK_SECRET_HEADER), configured)) {
+            return c.json({ error: 'Invalid webhook secret' }, 401);
+        }
+
         const { transactionId, status } = await c.req.json();
 
         if (!transactionId || !status) {
             return c.json({ error: "Transaction ID dan status wajib diisi" }, 400);
         }
 
-        const [donation] = await db.select().from(donations).where(eq(donations.transactionId, transactionId));
-        if (!donation) {
+        const detail = await getDonationModule(c).getByTransactionId(transactionId);
+        if (!detail) {
             return c.json({ error: "Donasi tidak ditemukan" }, 404);
         }
 
         try {
-            await getDonationModule(c).setStatus(donation.id, status);
+            await getDonationModule(c).setStatus(detail.donation.id, status);
         } catch (err) {
             if (err?.statusCode) return sendModuleError(c, err, 'error');
             throw err;
@@ -228,50 +255,43 @@ export const updatePaymentStatus = async (c) => {
 
 export const getDonationByTransactionId = async (c) => {
     try {
-        const db = c.get('db');
         const transactionId = c.req.param('transactionId');
 
-        const [row] = await db.select({
-            donations: donations,
-            campaigns: { title: campaigns.title },
-            users: { nama: users.nama, email: users.email }
-        })
-            .from(donations)
-            .leftJoin(campaigns, eq(donations.campaignId, campaigns.id))
-            .leftJoin(users, eq(donations.userId, users.id))
-            .where(eq(donations.transactionId, transactionId));
-
-        if (!row) {
+        // Joined lookup lives in the module (memory + drizzle); the adapter
+        // only maps module data ↔ HTTP and enforces owner-or-admin.
+        const detail = await getDonationModule(c).getByTransactionId(transactionId);
+        if (!detail) {
             return c.json({ error: "Donasi tidak ditemukan" }, 404);
         }
 
-        const donation = {
-            ...row.donations,
-            campaignId: row.campaigns,
-            userId: row.users ? { ...row.users, _id: row.donations.userId } : null
-        };
-
         const user = c.get('user');
-        // Jika hanya pemilik atau admin yang boleh akses
+        // Owner-or-admin only, compared on the raw FK (not the shaped object).
         if (
-            donation.userId && // check if exists
-            donation.userId._id !== user.userId &&
-            user.role !== "admin"
+            !user ||
+            (String(detail.donation.userId) !== String(user.userId) && user.role !== "admin")
         ) {
             return c.json({ error: "Akses ditolak" }, 403);
         }
 
-        return c.json(donation);
+        return c.json({
+            ...detail.donation,
+            campaignId: detail.campaign,
+            userId: detail.donor ? { ...detail.donor, _id: detail.donation.userId } : null,
+        });
     } catch (err) {
         console.error("Error getting donation:", err);
         return c.json({ error: "Server error" }, 500);
     }
 };
 
-// get all donations (Admin)
+// get all donations (Admin only; non-admins are forbidden, not just unauthenticated)
 export const getAllDonations = async (c) => {
     try {
         const db = c.get('db');
+        const user = c.get('user');
+        if (!user || user.role !== "admin") {
+            return c.json({ message: "Access denied. Admin only." }, 403);
+        }
         const page = parseInt(c.req.query('page') || '1');
         const limit = parseInt(c.req.query('limit') || '10');
         const status = c.req.query('status');

@@ -28,7 +28,9 @@ donations.patch('/:id/status', authenticateToken, donationController.updateDonat
 // Delete donation (admin only)
 donations.delete('/:id', authenticateToken, donationController.deleteDonation);
 
-// Update payment status (for payment gateway webhook)
+// Update payment status (payment gateway webhook; shared-secret locked via
+// `x-webhook-secret: <PAYMENT_WEBHOOK_SECRET>`, fail-closed 503 when unset.
+// See docs/donation-auth-matrix.md — never expose this without the secret.)
 donations.put('/payment-status', donationController.updatePaymentStatus);
 
 // Update proof of transfer (user only)
