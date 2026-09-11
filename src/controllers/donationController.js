@@ -1,6 +1,6 @@
-import { eq, desc, and, count } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { timingSafeEqual } from 'node:crypto';
-import { donations, campaigns, users } from '../db/schema.js';
+import { donations, campaigns } from '../db/schema.js';
 import { removeMediaBestEffort, createMedia } from '../modules/media/index.js';
 import { createDonationModule } from '../modules/donation/index.js';
 
@@ -100,101 +100,36 @@ export const updateDonationProof = async (c) => {
     }
 };
 
-// Get donations by campaign
+// Get donations by campaign (public; thin adapter → module `listByCampaign`
+// owns the completed-only filter, paging, and public row shape)
 export const getDonationsByCampaign = async (c) => {
     try {
-        const db = c.get('db');
         const campaignId = c.req.param('campaignId');
 
-        const page = parseInt(c.req.query('page') || '1');
-        const limit = parseInt(c.req.query('limit') || '10');
-        const offset = (page - 1) * limit;
-
-        const whereClause = and(
-            eq(donations.campaignId, campaignId),
-            eq(donations.paymentStatus, 'completed')
-        );
-
-        const [totalResult] = await db.select({ count: count() })
-            .from(donations)
-            .where(whereClause);
-
-        const total = totalResult.count;
-
-        const rows = await db.select({
-            donations: donations,
-            users: {
-                nama: users.nama
-            }
-        })
-            .from(donations)
-            .leftJoin(users, eq(donations.userId, users.id))
-            .where(whereClause)
-            .orderBy(desc(donations.completedAt))
-            .limit(limit)
-            .offset(offset);
-
-        return c.json({
-            donations: rows.map(r => ({
-                _id: r.donations.id,
-                amount: r.donations.amount,
-                message: r.donations.message,
-                donorName: r.donations.donorName,
-                isAnonymous: r.donations.isAnonymous,
-                completedAt: r.donations.completedAt,
-            })),
-            totalPages: Math.ceil(total / limit),
-            currentPage: page,
-            total,
+        const result = await getDonationModule(c).listByCampaign(campaignId, {
+            page: c.req.query('page'),
+            limit: c.req.query('limit'),
         });
+
+        return c.json(result);
     } catch (err) {
         console.error("Error getting donations:", err);
         return c.json({ error: "Server error" }, 500);
     }
 };
 
-// Get user's donations
+// Get user's donations (thin adapter → module `listMyDonations` owns the
+// owner filter, paging, and Campaign-joined row shape)
 export const getUserDonations = async (c) => {
     try {
-        const db = c.get('db');
         const user = c.get('user');
-        const userId = user.userId;
-        const page = parseInt(c.req.query('page') || '1');
-        const limit = parseInt(c.req.query('limit') || '10');
-        const offset = (page - 1) * limit;
 
-        const whereClause = eq(donations.userId, userId);
-
-        const [totalResult] = await db.select({ count: count() })
-            .from(donations)
-            .where(whereClause);
-        const total = totalResult.count;
-
-        const rows = await db.select({
-            donations: donations,
-            campaigns: {
-                title: campaigns.title,
-                imageUrl: campaigns.imageUrl
-            }
-        })
-            .from(donations)
-            .leftJoin(campaigns, eq(donations.campaignId, campaigns.id))
-            .where(whereClause)
-            .orderBy(desc(donations.createdAt))
-            .limit(limit)
-            .offset(offset);
-
-        const formattedDonations = rows.map(r => ({
-            ...r.donations,
-            campaignId: r.campaigns // Maintain structure where campaignId is the populated object
-        }));
-
-        return c.json({
-            donations: formattedDonations,
-            totalPages: Math.ceil(total / limit),
-            currentPage: page,
-            total,
+        const result = await getDonationModule(c).listMyDonations(user.userId, {
+            page: c.req.query('page'),
+            limit: c.req.query('limit'),
         });
+
+        return c.json(result);
     } catch (err) {
         console.error("Error getting user donations:", err);
         return c.json({ error: "Server error" }, 500);
@@ -259,74 +194,31 @@ export const getDonationByTransactionId = async (c) => {
             return c.json({ error: "Akses ditolak" }, 403);
         }
 
-        return c.json({
-            ...detail.donation,
-            campaignId: detail.campaign,
-            userId: detail.donor ? { ...detail.donor, _id: detail.donation.userId } : null,
-        });
+        // Row shape owned by the module; the adapter only enforces auth.
+        return c.json(getDonationModule(c).mapTransactionRow(detail));
     } catch (err) {
         console.error("Error getting donation:", err);
         return c.json({ error: "Server error" }, 500);
     }
 };
 
-// get all donations (Admin only; non-admins are forbidden, not just unauthenticated)
+// get all donations (Admin only; thin adapter → module `listAll` owns filters,
+// paging, and the valid-Campaign-consistent total)
 export const getAllDonations = async (c) => {
     try {
-        const db = c.get('db');
         const user = c.get('user');
         if (!user || user.role !== "admin") {
             return c.json({ message: "Access denied. Admin only." }, 403);
         }
-        const page = parseInt(c.req.query('page') || '1');
-        const limit = parseInt(c.req.query('limit') || '10');
-        const status = c.req.query('status');
-        const paymentMethod = c.req.query('paymentMethod');
-        const offset = (page - 1) * limit;
 
-        const filters = [];
-        if (status) filters.push(eq(donations.paymentStatus, status));
-        if (paymentMethod) filters.push(eq(donations.paymentMethod, paymentMethod));
-
-        const whereClause = filters.length > 0 ? and(...filters) : undefined;
-
-        const [totalResult] = await db.select({ count: count() }).from(donations).where(whereClause);
-        const total = totalResult.count;
-
-        const rows = await db.select({
-            donations: donations,
-            campaigns: {
-                title: campaigns.title,
-                imageUrl: campaigns.imageUrl
-            },
-            users: {
-                nama: users.nama,
-                email: users.email
-            }
-        })
-            .from(donations)
-            .leftJoin(campaigns, eq(donations.campaignId, campaigns.id))
-            .leftJoin(users, eq(donations.userId, users.id))
-            .where(whereClause)
-            .orderBy(desc(donations.createdAt))
-            .limit(limit)
-            .offset(offset);
-
-        // Filter valid donations (join might return null campaign if deleted, though foreign key might restrict it)
-        const validDonations = rows
-            .filter(r => r.campaigns !== null)
-            .map(r => ({
-                ...r.donations,
-                campaignId: r.campaigns,
-                userId: r.users
-            }));
-
-        return c.json({
-            donations: validDonations,
-            totalPages: Math.ceil(total / limit),
-            currentPage: page,
-            total,
+        const result = await getDonationModule(c).listAll({
+            page: c.req.query('page'),
+            limit: c.req.query('limit'),
+            status: c.req.query('status'),
+            paymentMethod: c.req.query('paymentMethod'),
         });
+
+        return c.json(result);
     } catch (err) {
         console.error("Error getting all donations:", err);
         return c.json({ error: "Server error" }, 500);

@@ -1,4 +1,4 @@
-import { and, eq, sum, count } from 'drizzle-orm';
+import { and, desc, eq, sum, count } from 'drizzle-orm';
 import { donations as donationsTable, campaigns as campaignsTable, users as usersTable } from '../../db/schema.js';
 import { ValidationError, NotFoundError, ForbiddenError, ConflictError } from './errors.js';
 
@@ -435,7 +435,221 @@ export function createDonationModule({ db, media, generateTransactionId } = {}) 
     return drizzleUpdateProof(id, proofUrl, user);
   }
 
-  return { create, complete, fail, setStatus, remove, recalcStats, getByTransactionId, updateProof };
+  // --- Read paths (C02-T3): join shaping owned by the module's row mapper,
+  // one shape per consumer. Pagination meta is always consistent:
+  // totalPages = ceil(total/limit), currentPage = requested page. ---
+
+  function clampPageLimit(query = {}) {
+    let page = parseInt(query.page ?? 1, 10);
+    let limit = parseInt(query.limit ?? 10, 10);
+    if (!Number.isFinite(page) || page < 1) page = 1;
+    if (!Number.isFinite(limit) || limit < 1) limit = 10;
+    return { page, limit };
+  }
+
+  function descByTime(rows, key) {
+    return [...rows].sort((a, b) => {
+      const ta = a[key] instanceof Date ? a[key].getTime() : new Date(a[key]).getTime();
+      const tb = b[key] instanceof Date ? b[key].getTime() : new Date(b[key]).getTime();
+      if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+      if (Number.isNaN(ta)) return 1;
+      if (Number.isNaN(tb)) return -1;
+      return tb - ta;
+    });
+  }
+
+  function paginate(sorted, total, page, limit) {
+    return {
+      total,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+      pageRows: sorted.slice((page - 1) * limit, (page - 1) * limit + limit),
+    };
+  }
+
+  // Public social-proof shape: completed donations only, no donor identity
+  // beyond the (possibly anonymous) display name.
+  function mapPublicByCampaignRow(row) {
+    return {
+      _id: row.id,
+      amount: row.amount,
+      message: row.message,
+      donorName: row.donorName,
+      isAnonymous: !!row.isAnonymous,
+      completedAt: row.completedAt,
+    };
+  }
+
+  // Donor-history shape: full row with the linked Campaign title + image.
+  function mapMyDonationRow(row, campaign) {
+    return {
+      ...row,
+      campaignId: campaign ? { title: campaign.title, imageUrl: campaign.imageUrl } : null,
+    };
+  }
+
+  // Admin-moderation shape: full row with Campaign ref + donor identity.
+  function mapAdminRow(row, campaign, donor) {
+    return {
+      ...row,
+      campaignId: campaign ? { title: campaign.title, imageUrl: campaign.imageUrl } : null,
+      userId: donor ? { nama: donor.nama, email: donor.email } : null,
+    };
+  }
+
+  // Transaction-lookup shape: full row with Campaign ref + donor identity
+  // (legacy `_id` alias on the donor ref preserved for the frontend).
+  function mapTransactionRow(detail) {
+    return {
+      ...detail.donation,
+      campaignId: detail.campaign,
+      userId: detail.donor ? { ...detail.donor, _id: detail.donation.userId } : null,
+    };
+  }
+
+  function memoryCampaignsById() {
+    return new Map((db.__tables.campaigns || []).map((c) => [String(c.id), c]));
+  }
+
+  function memoryUsersById() {
+    return new Map((db.__tables.users || []).map((u) => [String(u.id), u]));
+  }
+
+  async function listMyDonations(userId, query = {}) {
+    const { page, limit } = clampPageLimit(query);
+    if (isMemoryDb) {
+      const rows = descByTime(
+        (db.__tables.donations || []).filter((d) => String(d.userId) === String(userId)),
+        'createdAt',
+      );
+      const campaignsById = memoryCampaignsById();
+      const { totalPages, currentPage, pageRows } = paginate(rows, rows.length, page, limit);
+      return {
+        donations: pageRows.map((r) => mapMyDonationRow({ ...r }, campaignsById.get(String(r.campaignId)) || null)),
+        total: rows.length,
+        totalPages,
+        currentPage,
+      };
+    }
+    const whereClause = eq(donationsTable.userId, userId);
+    const [totalResult] = await db.select({ count: count() }).from(donationsTable).where(whereClause);
+    const total = totalResult.count;
+    const offset = (page - 1) * limit;
+    const rows = await db.select({
+      donations: donationsTable,
+      campaigns: { title: campaignsTable.title, imageUrl: campaignsTable.imageUrl },
+    })
+      .from(donationsTable)
+      .leftJoin(campaignsTable, eq(donationsTable.campaignId, campaignsTable.id))
+      .where(whereClause)
+      .orderBy(desc(donationsTable.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return {
+      donations: rows.map((r) => mapMyDonationRow(r.donations, r.campaigns)),
+      total,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+    };
+  }
+
+  async function listByCampaign(campaignId, query = {}) {
+    const { page, limit } = clampPageLimit(query);
+    if (isMemoryDb) {
+      const rows = descByTime(
+        (db.__tables.donations || []).filter(
+          (d) => String(d.campaignId) === String(campaignId) && d.paymentStatus === COMPLETED,
+        ),
+        'completedAt',
+      );
+      const { totalPages, currentPage, pageRows } = paginate(rows, rows.length, page, limit);
+      return {
+        donations: pageRows.map((r) => mapPublicByCampaignRow({ ...r })),
+        total: rows.length,
+        totalPages,
+        currentPage,
+      };
+    }
+    const whereClause = and(
+      eq(donationsTable.campaignId, campaignId),
+      eq(donationsTable.paymentStatus, COMPLETED),
+    );
+    const [totalResult] = await db.select({ count: count() }).from(donationsTable).where(whereClause);
+    const total = totalResult.count;
+    const offset = (page - 1) * limit;
+    const rows = await db.select({ donations: donationsTable })
+      .from(donationsTable)
+      .where(whereClause)
+      .orderBy(desc(donationsTable.completedAt))
+      .limit(limit)
+      .offset(offset);
+    return {
+      donations: rows.map((r) => mapPublicByCampaignRow(r.donations)),
+      total,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+    };
+  }
+
+  async function listAll(query = {}) {
+    const { page, limit } = clampPageLimit(query);
+    const status = query.status || undefined;
+    const paymentMethod = query.paymentMethod || undefined;
+    if (isMemoryDb) {
+      let rows = [...(db.__tables.donations || [])];
+      if (status) rows = rows.filter((d) => d.paymentStatus === status);
+      if (paymentMethod) rows = rows.filter((d) => d.paymentMethod === paymentMethod);
+      const campaignsById = memoryCampaignsById();
+      const usersById = memoryUsersById();
+      // Valid-Campaign filter applies to the total as well as the items,
+      // so pagination meta can never drift from the returned page.
+      const valid = descByTime(
+        rows.filter((d) => campaignsById.has(String(d.campaignId))),
+        'createdAt',
+      );
+      const { totalPages, currentPage, pageRows } = paginate(valid, valid.length, page, limit);
+      return {
+        donations: pageRows.map((r) =>
+          mapAdminRow({ ...r }, campaignsById.get(String(r.campaignId)) || null, usersById.get(String(r.userId)) || null),
+        ),
+        total: valid.length,
+        totalPages,
+        currentPage,
+      };
+    }
+    const filters = [];
+    if (status) filters.push(eq(donationsTable.paymentStatus, status));
+    if (paymentMethod) filters.push(eq(donationsTable.paymentMethod, paymentMethod));
+    const whereClause = filters.length > 0 ? and(...filters) : undefined;
+    // Inner join on campaigns for BOTH the count and the items: orphan rows
+    // (campaign deleted) are excluded from `total` exactly as from `items`.
+    const [totalResult] = await db.select({ count: count() })
+      .from(donationsTable)
+      .innerJoin(campaignsTable, eq(donationsTable.campaignId, campaignsTable.id))
+      .where(whereClause);
+    const total = totalResult.count;
+    const offset = (page - 1) * limit;
+    const rows = await db.select({
+      donations: donationsTable,
+      campaigns: { title: campaignsTable.title, imageUrl: campaignsTable.imageUrl },
+      users: { nama: usersTable.nama, email: usersTable.email },
+    })
+      .from(donationsTable)
+      .innerJoin(campaignsTable, eq(donationsTable.campaignId, campaignsTable.id))
+      .leftJoin(usersTable, eq(donationsTable.userId, usersTable.id))
+      .where(whereClause)
+      .orderBy(desc(donationsTable.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return {
+      donations: rows.map((r) => mapAdminRow(r.donations, r.campaigns, r.users)),
+      total,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+    };
+  }
+
+  return { create, complete, fail, setStatus, remove, recalcStats, getByTransactionId, updateProof, listMyDonations, listByCampaign, listAll, mapTransactionRow };
 }
 
 export { ValidationError, NotFoundError, ForbiddenError, ConflictError };
