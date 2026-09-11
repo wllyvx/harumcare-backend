@@ -370,6 +370,9 @@ export function createDonationModule({ db, media, generateTransactionId } = {}) 
         }
         // Guard reuse: deletion counts as leaving `completed` (same single seam).
         if (touchesCompleted(row.paymentStatus, 'deleted')) memoryRecalc(row.campaignId);
+        // Proof file reclaimed best-effort after the DB commit — media failure
+        // warns inside bestEffortMediaRemove and never rolls back the delete.
+        await bestEffortMediaRemove(row.proofOfTransfer);
         return { ...row };
       } catch (e) {
         restoreMemory(snap);
@@ -378,11 +381,37 @@ export function createDonationModule({ db, media, generateTransactionId } = {}) 
     }
 
     const donation = await drizzleGet(id);
-    await db.delete(donationsTable).where(eq(donationsTable.id, id));
+    const needsRecalc = touchesCompleted(donation.paymentStatus, 'deleted');
+    if (!needsRecalc) {
+      await db.delete(donationsTable).where(eq(donationsTable.id, id));
+      await bestEffortMediaRemove(donation.proofOfTransfer);
+      return donation;
+    }
+    // Atomic delete + stats rewrite: compute post-delete stats first, then
+    // commit both writes in one batch so no orphan/stats-drift state is visible.
+    const [stats] = await db.select({
+      totalAmount: sum(donationsTable.amount),
+      totalDonors: count(donationsTable.id),
+    })
+      .from(donationsTable)
+      .where(and(eq(donationsTable.campaignId, donation.campaignId), eq(donationsTable.paymentStatus, COMPLETED)));
+    let currentAmount = Number(stats?.totalAmount || 0) - Number(donation.amount || 0);
+    let donorCount = Number(stats?.totalDonors || 0) - 1;
+    if (currentAmount < 0) currentAmount = 0;
+    if (donorCount < 0) donorCount = 0;
     if (db.__failAfterDonationWrite) {
       throw new Error('injected batch failure after donation write');
     }
-    if (touchesCompleted(donation.paymentStatus, 'deleted')) await drizzleRecalc(donation.campaignId);
+    if (typeof db.batch === 'function') {
+      await db.batch([
+        db.delete(donationsTable).where(eq(donationsTable.id, id)),
+        db.update(campaignsTable).set({ currentAmount, donorCount }).where(eq(campaignsTable.id, donation.campaignId)),
+      ]);
+    } else {
+      await db.delete(donationsTable).where(eq(donationsTable.id, id));
+      await db.update(campaignsTable).set({ currentAmount, donorCount }).where(eq(campaignsTable.id, donation.campaignId));
+    }
+    await bestEffortMediaRemove(donation.proofOfTransfer);
     return donation;
   }
 

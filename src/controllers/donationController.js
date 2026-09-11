@@ -1,10 +1,8 @@
 import { eq } from 'drizzle-orm';
 import { timingSafeEqual } from 'node:crypto';
-import { donations, campaigns } from '../db/schema.js';
-import { removeMediaBestEffort, createMedia } from '../modules/media/index.js';
+import { campaigns } from '../db/schema.js';
+import { createMedia } from '../modules/media/index.js';
 import { createDonationModule } from '../modules/donation/index.js';
-
-const removeMedia = (c, url) => removeMediaBestEffort(c.env?.BUCKET, url);
 
 // Thin adapter over the deep Donation module (C02): all status transitions
 // and Campaign-stats writes live inside the module. This file only maps
@@ -267,32 +265,28 @@ export const updateDonationStatus = async (c) => {
     }
 };
 
-// Delete donation (admin only; thin adapter → module `remove` owns delete + recalc)
+// Delete donation (admin only; thin adapter → module `remove` owns delete +
+// recalc + best-effort proof cleanup atomically; existence is owned by the
+// module so the adapter works on both the memory fake and drizzle)
 export const deleteDonation = async (c) => {
     try {
         const db = c.get('db');
         const user = c.get('user');
-        if (user.role !== 'admin') {
+        if (!user || user.role !== 'admin') {
             return c.json({ error: 'Unauthorized access' }, 403);
         }
 
         const id = c.req.param('id');
 
-        const [existing] = await db.select().from(donations).where(eq(donations.id, id));
-        if (!existing) {
-            return c.json({ error: 'Donasi tidak ditemukan' }, 404);
-        }
-
         let removed;
         try {
             removed = await getDonationModule(c).remove(id);
         } catch (err) {
+            if (err?.statusCode === 404) {
+                return c.json({ error: 'Donasi tidak ditemukan' }, 404);
+            }
             if (err?.statusCode) return sendModuleError(c, err, 'error');
             throw err;
-        }
-
-        if (removed.proofOfTransfer) {
-            await removeMedia(c, removed.proofOfTransfer);
         }
 
         let updatedStats = null;

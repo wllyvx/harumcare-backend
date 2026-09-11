@@ -1,6 +1,7 @@
 import { eq, desc, sql, count, sum, and, gte, lt } from 'drizzle-orm';
-import { campaigns, news, donations } from '../db/schema.js';
-import { removeMediaBestEffort } from '../modules/media/index.js';
+import { campaigns, news } from '../db/schema.js';
+import { removeMediaBestEffort, createMedia } from '../modules/media/index.js';
+import { createCampaignModule } from '../modules/campaign/index.js';
 
 const removeMedia = (c, url) => removeMediaBestEffort(c.env?.BUCKET, url);
 
@@ -199,41 +200,27 @@ export const updateCampaign = async (c) => {
 
 export const deleteCampaign = async (c) => {
     try {
-        const db = c.get('db');
         const campaignId = c.req.param('id');
 
-        const [campaign] = await db.select().from(campaigns).where(eq(campaigns.id, campaignId));
-
-        if (!campaign) {
-            return c.json({ error: 'Campaign tidak ditemukan' }, 404);
-        }
-
-        // Check if campaign has donations and warn admin
-        if (campaign.currentAmount > 0) {
-            // Allow deletion but with warning - admin should be aware of consequences
-            console.warn(`Admin is deleting campaign "${campaign.title}" with ${campaign.currentAmount} in donations and ${campaign.donorCount} donors`);
-        }
-
-        // Delete images from R2
-        if (campaign.imageUrl) await removeMedia(c, campaign.imageUrl);
-        if (campaign.organizationLogo) await removeMedia(c, campaign.organizationLogo);
-
-        // Also delete related donations images (proofOfTransfer)
-        const campaignDonations = await db.select().from(donations).where(eq(donations.campaignId, campaignId));
-        for (const donation of campaignDonations) {
-            if (donation.proofOfTransfer) {
-                await removeMedia(c, donation.proofOfTransfer);
+        // Thin adapter over the Campaign removal seam (C02-T4): the module
+        // owns atomic Campaign + donations deletes with media cleanup
+        // best-effort-after-commit. No sequential loop with interleaved
+        // media deletes lives here.
+        const mod = createCampaignModule({ db: c.get('db'), media: createMedia({ bucket: c.env?.BUCKET }) });
+        let result;
+        try {
+            result = await mod.remove(campaignId);
+        } catch (err) {
+            if (err?.statusCode === 404) {
+                return c.json({ error: 'Campaign tidak ditemukan' }, 404);
             }
+            throw err;
         }
-
-        // Also delete related donations to maintain data integrity
-        await db.delete(donations).where(eq(donations.campaignId, campaignId));
-
-        await db.delete(campaigns).where(eq(campaigns.id, campaignId));
 
         return c.json({
             message: 'Campaign berhasil dihapus',
-            warning: campaign.currentAmount > 0 ? 'Campaign yang dihapus memiliki donasi yang juga akan dihapus' : null
+            warning: result.warning,
+            removedDonationCount: result.removedDonationCount
         });
     } catch (err) {
         console.error('Error deleting campaign:', err);
