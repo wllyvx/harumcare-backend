@@ -8,6 +8,7 @@ const campaigns = new Hono();
 // Public routes
 campaigns.get('/', campaignController.getAllCampaigns);
 campaigns.get('/stats', campaignController.getCampaignStats);
+campaigns.get('/categories', campaignController.getCampaignCategories);
 campaigns.get('/:id', campaignController.getCampaignById);
 
 // Admin only routes

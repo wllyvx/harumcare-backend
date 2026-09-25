@@ -1,5 +1,7 @@
-import { eq, desc, sql, count, sum, and, gte, lt } from 'drizzle-orm';
+import { eq, desc, sql, count, sum, and, or, gte, lt } from 'drizzle-orm';
 import { campaigns, news } from '../db/schema.js';
+
+const escapeLike = (s) => s.replace(/[\\%_]/g, (m) => `\\${m}`);
 import { removeMediaBestEffort, createMedia } from '../modules/media/index.js';
 import { createCampaignModule } from '../modules/campaign/index.js';
 
@@ -12,12 +14,22 @@ export const getAllCampaigns = async (c) => {
         const limit = parseInt(c.req.query('limit') || '100');
         const category = c.req.query('category');
         const status = c.req.query('status');
+        const searchRaw = c.req.query('search') || c.req.query('q');
+        const search = typeof searchRaw === 'string' && searchRaw.trim() !== '' ? searchRaw.trim() : undefined;
 
         const offset = (queryPage - 1) * limit;
 
         const filters = [];
         if (category) {
             filters.push(eq(campaigns.category, category));
+        }
+
+        if (search) {
+            const pattern = `%${escapeLike(search)}%`;
+            filters.push(or(
+                sql`${campaigns.title} LIKE ${pattern} ESCAPE '\\'`,
+                sql`${campaigns.description} LIKE ${pattern} ESCAPE '\\'`
+            ));
         }
 
         const now = new Date();
@@ -51,6 +63,21 @@ export const getAllCampaigns = async (c) => {
         });
     } catch (err) {
         console.error('Error getting campaigns:', err);
+        return c.json({ error: 'Server error: ' + err.message }, 500);
+    }
+};
+
+export const getCampaignCategories = async (c) => {
+    try {
+        const db = c.get('db');
+        const rows = await db.selectDistinct({ category: campaigns.category }).from(campaigns);
+        const categories = rows
+            .map((r) => r.category)
+            .filter((v) => typeof v === 'string' && v.trim() !== '')
+            .sort((a, b) => a.localeCompare(b));
+        return c.json({ categories });
+    } catch (err) {
+        console.error('Error getting campaign categories:', err);
         return c.json({ error: 'Server error: ' + err.message }, 500);
     }
 };
